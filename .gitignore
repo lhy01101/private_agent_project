@@ -7,3 +7,4 @@ chroma_rag/
 .gradio/
 web_agent/
 stock_agent/
+main.py
