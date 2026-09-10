@@ -1,0 +1,9 @@
+.venv/
+.idea/
+__pycache__/
+*.pyc
+self_packeges/.env
+chroma_rag/
+.gradio/
+web_agent/
+stock_agent/
