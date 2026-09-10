@@ -132,7 +132,7 @@
 pos_score = 0.7 × example_sim + 0.3 × desc_sim     # 正例 + 描述（和原来一样）
 neg_sim   = 与 negative_examples 的最大余弦相似度   # 新增：越像负例越高
 net_score = pos_score − 0.5 × neg_sim              # 净分（被负例拉低）
-
+- 将项目push到git上
 
 ---
 # 出现的问题
