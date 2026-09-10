@@ -1,0 +1,5 @@
+系统环境
+    全局装uv
+    单个项目uv init
+包
+    uv add langchain

@@ -2,7 +2,8 @@
 .idea/
 __pycache__/
 *.pyc
-self_packeges/.env
+self_packages/.env
+.env
 chroma_rag/
 .gradio/
 web_agent/
