@@ -4,40 +4,56 @@
 
 【这个中间件是干什么的？】
 --------------------------
-在 Agent 真正调用大模型之前，拦截这次请求，根据用户最新的提问，
-用 tool_router 算出"本次该暴露哪些工具"，然后把 agent 可用的工具列表
-裁剪到只剩这些。模型看不到无关工具 → 减少幻觉、降低 token、提升准确率。
+在 Agent 真正调用大模型之前 / 之后拦截请求，做两件事：
+
+  (A) 调模型【前】—— 用 tool_router 裁剪工具列表（原有能力）
+      → 模型只看到本次需要的工具，减少幻觉、节省 token
+
+  (B) 调模型【后】—— 检测 & 规范化模型的工具调用（本次新增）
+      → DeepSeek 有时会输出 DSML 多调用块（<｜｜DSML｜｜ calls> ...），
+        框架默认解析器不认识 → 工具调用被静默丢弃。
+        本中间件把 DSML 块解析成标准 tool_call 结构，并对「同一工具重复调用」
+        （如中/英文两个 query）做合并去重。
 
 【核心机制：你必须理解这几点】
 ---------------------------------
 1. 框架在"调工具"、"调模型"这两个时机，会回调对应的 wrap_* / awrap_* 方法。
-   - wrap_tool_call / awrap_tool_call ：拦截「工具执行」
-   - wrap_model_call / awrap_model_call：拦截「模型调用」  ← 我们在这里裁剪工具
+   - wrap_tool_call / awrap_tool_call ：拦截「工具执行」（本中间件直接透传）
+   - wrap_model_call / awrap_model_call：拦截「模型调用」  ← 裁剪 + DSML 规范化都在这里
 
-2. 每个方法都会拿到：
-   - request：本次请求。这是一个 ModelRequest 对象，核心字段：
-       · request.messages：本次要发给模型的消息列表（list[BaseMessage]）
-       · request.tools   ：当前可用工具列表
-       · request.state   ：agent 状态；request.runtime：运行时上下文
-     ⚠️ 注意：是 request.messages，不是 request.input["messages"]！
-   - call   ：一个"继续往下走"的函数。你不调用 call(request)，整条链路就断了。
+2. wrap_model_call 的完整流程：
+       request ──▶ [裁剪工具] ──▶ call(request) ──▶ response
+                                                     │
+                                          [检测 DSML 块] ──▶ 解析 / 合并 / 重写 response
+                                                     │
+                                                 返回 response
 
-3. 想改参数？用 request.override(字段=新值) 生成一个新 request，再传给 call()。
-   ⚠️ 永远不要直接修改 request.tools，要用 override 返回新对象（不可变思想）。
+3. 想改参数？用 request.override(字段=新值) / response.override(...) 生成新对象。
+   ⚠️ 永远不要原地修改，要用 override 返回新对象（不可变思想）。
 
 4. 同步方法（wrap_*）给「同步 agent」用，异步方法（awrap_*）给「异步 agent」用。
    两者逻辑必须一致，否则同步/异步跑出不同结果，极难排查。
 
 【关于 select_tools 的注意事项】
 --------------------------------
-select_tools() 内部会跑 embedder.embed_query()，这是一次模型推理（CPU/GPU 计算）。
+select_tools() 内部会跑 embedder.embed_query()，是一次模型推理（CPU/GPU 计算）。
 - 在同步环境（wrap_model_call）里直接调用没问题。
 - 在异步环境（awrap_model_call）里【不能】直接调用，否则会阻塞整个事件循环。
-  → 解决：用 asyncio 的 run_in_executor 把它丢到线程池里去跑。
+  → 用 asyncio 的 run_in_executor 把它丢到线程池里去跑。
+
+【关于 DSML 规范化的注意事项】
+------------------------------
+- DSML 出现在【模型输出】里，因此规范化逻辑放在「call(request) 之后」处理 response。
+- 解析出的 tool_calls 会尝试写回 response，让框架正常执行；若你的 LangChain 版本
+  的 ModelResponse 不支持 .override(tool_calls=...)，请参照下方「接入说明」自行适配。
+- 合并策略：同一工具名只保留一个调用，query 取「更长 / 信息量更大」的那条
+  （通常是更完整的表达，丢弃其翻译/重复版本）。
 """
 
 import asyncio
 import logging
+import re
+from dataclasses import dataclass, field
 from typing import Optional
 
 from langchain.agents.middleware import AgentMiddleware
@@ -47,10 +63,192 @@ from self_packages.tool_router import select_tools  # 返回 List[BaseTool]，�
 logger = logging.getLogger(__name__)
 
 
+# ====================================================================== #
+# 一、DSML 解析 & 合并（与中间件主体解耦，方便单独单测）
+# ====================================================================== #
+
+@dataclass
+class ParsedToolCall:
+    """从 DSML 块中解析出的单个工具调用。"""
+    name: str
+    arguments: dict = field(default_factory=dict)
+
+
+class DSMLParser:
+    """
+    DeepSeek DSML 多调用块的解析器。
+
+    支持的输入形态（均会被匹配）：
+        <｜｜DSML｜｜ calls>
+            <｜｜DSML｜｜ invoke name="search_knowledge_base">
+                <｜｜DSML｜｜ parameter name="query" string="true">工具提示词</｜｜DSML｜｜ parameter>
+            </｜｜DSML｜｜ invoke>
+            ...
+        </｜｜DSML｜｜ calls>
+
+    说明：
+        - 一个 <calls> 块内可有多个 <invoke>（即一次声明多个并行调用）。
+        - 同一 <invoke> 可能有多个 <parameter>（本类会把同名参数合并为 list）。
+    """
+
+    # 整段 calls 块（分隔符是全角竖线 ｜ = U+FF5C，此处直接写字面量，避免编码歧义）
+    _CALLS_BLOCK = re.compile(
+        r"<｜｜DSML｜｜\s*calls\s*>"
+        r"(.*?)"
+        r"</｜｜DSML｜｜\s*calls\s*>",
+        re.DOTALL,
+    )
+    # 单个 invoke（name 用命名分组，供 parse 取值）
+    _INVOKE = re.compile(
+        r'invoke\s+name\s*=\s*"(?P<name>[^"]+)"',
+        re.DOTALL,
+    )
+    # 单个 parameter：name="..." [type="..."] > value <
+    _PARAM = re.compile(
+        r'parameter\s+name\s*=\s*"([^"]+)"'
+        r'(?:\s+[^\s>]+)?'          # 容忍 string="true" / type="..." 等额外属性
+        r"\s*>"
+        r"(.*?)"
+        r"</",
+        re.DOTALL,
+    )
+
+    @classmethod
+    def contains_dsml(cls, text: str) -> bool:
+        """快速判断一段文本是否包含 DSML calls 块。"""
+        if not text:
+            return False
+        return "<｜｜DSML｜｜ calls>" in text or bool(cls._CALLS_BLOCK.search(text))
+
+    @classmethod
+    def parse(cls, text: str) -> list[ParsedToolCall]:
+        """
+        把 DSML 文本解析成结构化调用列表。
+        找不到任何块时返回 []（不抛异常，保证中间件不中断主链路）。
+
+        处理策略：先定位 <calls> 块，再逐个 <invoke>...</invoke> 子块解析，
+        每块内收集所有 <parameter>，同名参数合并为 list。
+        """
+        if not text:
+            return []
+
+        calls: list[ParsedToolCall] = []
+        for block in cls._CALLS_BLOCK.findall(text):
+            # 逐个 <invoke name="...">...</invoke> 块处理。
+            # 用 finditer 拿到每个 invoke 的起止：起始=name 后，终止=下一个 invoke 起点或块尾。
+            # 区间内的 <parameter> 统一交给 _PARAM 正则提取（兼容简写闭合）。
+            invoke_spans = list(cls._INVOKE.finditer(block))
+            for i, invoke_match in enumerate(invoke_spans):
+                name = invoke_match.group("name").strip()
+                start = invoke_match.end()
+                # 终止：下一个 invoke 的起点；没有则用块尾
+                if i + 1 < len(invoke_spans):
+                    end = invoke_spans[i + 1].start()
+                else:
+                    end = len(block)
+                chunk = block[start:end]
+
+                args: dict = {}
+                for p_name, p_value in cls._PARAM.findall(chunk):
+                    p_name = p_name.strip()
+                    p_value = p_value.strip()
+                    # 同名参数 → 合并成 list（保留顺序）
+                    if p_name in args:
+                        existing = args[p_name]
+                        if isinstance(existing, list):
+                            existing.append(p_value)
+                        else:
+                            args[p_name] = [existing, p_value]
+                    else:
+                        args[p_name] = p_value
+
+                calls.append(ParsedToolCall(name=name, arguments=args))
+
+        return calls
+
+
+def merge_duplicate_calls(calls: list[ParsedToolCall]) -> list[ParsedToolCall]:
+    """
+    合并「同一工具」的重复调用。
+
+    规则：相同 name 只保留一个。当多个调用争用时，query 取「信息量更大」的那条——
+    用 (长度, 是否像英文/翻译) 综合判断：优先保留更长的中文原句，丢弃其翻译/重复版本。
+
+    例：
+        search_knowledge_base("工具提示词 负例 机制")
+        search_knowledge_base("tool prompt 负例 示例 工具选择")   ← 英文翻译，丢弃
+        web_search("iPhone 18 发布 价格 配置")
+        web_search("iPhone 18 release date specs price 2026")   ← 英文翻译，丢弃
+        → 各保留 1 个
+    """
+    def _query_info(call: ParsedToolCall) -> str:
+        # 兼容参数名叫 query / q / input 的常见情况
+        for key in ("query", "q", "input", "question"):
+            val = call.arguments.get(key)
+            if isinstance(val, str) and val:
+                return val
+        # 兜底：取第一个字符串参数
+        for val in call.arguments.values():
+            if isinstance(val, str) and val:
+                return val
+        return ""
+
+    def _score(text: str) -> tuple:
+        """
+        信息量评分，用于「同一工具的多个调用」争用时决定保留哪一个。
+
+        优先级：
+          1) CJK 字符占比高 → 视为「原文」，优先保留（剔除其翻译副本）；
+          2) 占比相当时，取更长（信息更完整）的那条。
+
+        用「占比」而非「个数」，是为了区分「纯中文原文」与
+        「英文翻译里夹了几个中文词」这类混合文本。
+
+        返回 tuple 可直接比较大小：(cjk_ratio, length)
+        """
+        if not text:
+            return (-1.0, 0)
+        cjk = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
+        ratio = cjk / len(text)
+        return (ratio, len(text))
+
+    seen: dict[str, ParsedToolCall] = {}
+    order: list[str] = []
+    for call in calls:
+        name = call.name
+        if name in seen:
+            # 争用：保留信息量更大的那条
+            old_info = _query_info(seen[name])
+            new_info = _query_info(call)
+            if _score(new_info) > _score(old_info):
+                seen[name] = call
+        else:
+            seen[name] = call
+            order.append(name)
+
+    return [seen[n] for n in order]
+
+
+# ====================================================================== #
+# 二、中间件主体
+# ====================================================================== #
+
 class ToolRoutingMiddleware(AgentMiddleware):
     name = "tool_routing"
     # trace_policy：是否需要追踪/埋点。None 表示不启用，保持默认即可。
     trace_policy = None
+
+    # ---- 可通过构造参数调整的行为 ----
+    def __init__(
+        self,
+        *,
+        enable_dsml: bool = True,        # 是否启用 DSML 检测/规范化
+        dsml_merge: bool = True,         # 是否合并同一工具的重复调用
+        dsml_strip_from_text: bool = True,  # 规范化后是否从文本里剥离 DSML 原文
+    ):
+        self.enable_dsml = enable_dsml
+        self.dsml_merge = dsml_merge
+        self.dsml_strip_from_text = dsml_strip_from_text
 
     # ------------------------------------------------------------------ #
     # 工具调用拦截（本中间件不需要动工具执行，直接透传即可）
@@ -64,54 +262,162 @@ class ToolRoutingMiddleware(AgentMiddleware):
         return await call(request)
 
     # ------------------------------------------------------------------ #
-    # 模型调用拦截（核心：在这里裁剪工具列表）
+    # 模型调用拦截（核心：裁剪工具 + DSML 规范化）
     # ------------------------------------------------------------------ #
     def wrap_model_call(self, request, call):
-        """
-        同步版本：裁剪工具后再放行。
-        逻辑与异步版完全一致，区别只在「怎么调用 select_tools」。
-        """
-        # 1. 取出用户最新一条消息的文本
-        content = self._extract_last_user_content(request)
+        # —— 阶段 1：裁剪工具（调模型前）——
+        request = self._filter_tools(request)
 
-        # 2. 根据内容算出本次允许的工具（同步调用，同步环境里 OK）
-        #    allowed_names 为 None 表示"路由失败/取不到内容"，此时保守放行全部工具
-        allowed_names = self._compute_allowed(content)
+        # —— 阶段 2：调用模型，拿到 response ——
+        response = call(request)
 
-        # 3. 用算出的名字去 request.tools 里过滤（保留 request 里的原始工具对象）
-        #    若为 None → 降级：保留全部工具（宁可多给，别误杀）
-        if allowed_names is None:
-            return call(request)
-        filtered = [t for t in request.tools if t.name in allowed_names]
+        # —— 阶段 3：规范化 DSML（调模型后）——
+        if self.enable_dsml:
+            response = self._normalize_dsml(response)
 
-        # 4. 放行（工具为空 = 不给工具，让模型直接文本回答）
-        request = request.override(tools=filtered)
-        if not filtered:
-            logger.warning("[ToolRouting] no tools allowed, falling back to text-only answer")
-        return call(request)
+        return response
 
     async def awrap_model_call(self, request, call):
-        """
-        异步版本：裁剪工具后再放行。
-        与同步版唯一区别：select_tools 含模型推理，必须丢到线程池避免阻塞事件循环。
-        """
+        # —— 阶段 1：裁剪工具（调模型前）——
+        #   select_tools 含模型推理，必须丢到线程池避免阻塞事件循环
         content = self._extract_last_user_content(request)
-
-        # ★ 关键点：select_tools 是同步且有 CPU/GPU 计算的，不能在 async 里直接 await 它，
-        #   而是把它提交到默认线程池，让出事件循环给其他协程。
         allowed_names = await asyncio.get_event_loop().run_in_executor(
             None,                          # 使用默认的 ThreadPoolExecutor
             self._compute_allowed,         # 要执行的函数
             content,                       # 函数的参数
         )
-
         if allowed_names is None:
-            return await call(request)
+            # 路由失败 → 降级放行全部工具（在 override 里保留原 tools）
+            pass
+        else:
+            filtered = [t for t in request.tools if t.name in allowed_names]
+            request = request.override(tools=filtered)
+            if not filtered:
+                logger.warning("[ToolRouting] no tools allowed, falling back to text-only answer")
+
+        # —— 阶段 2：调用模型 ——
+        response = await call(request)
+
+        # —— 阶段 3：规范化 DSML（调模型后）——
+        if self.enable_dsml:
+            response = await asyncio.get_event_loop().run_in_executor(
+                None, self._normalize_dsml, response
+            )
+
+        return response
+
+    # ------------------------------------------------------------------ #
+    # 阶段 1：工具裁剪（同步/异步共用）
+    # ------------------------------------------------------------------ #
+    def _filter_tools(self, request):
+        """同步版的裁剪入口（供 wrap_model_call 使用）。"""
+        content = self._extract_last_user_content(request)
+        allowed_names = self._compute_allowed(content)
+        if allowed_names is None:
+            return request  # 降级：保留全部工具
         filtered = [t for t in request.tools if t.name in allowed_names]
-        request = request.override(tools=filtered)
         if not filtered:
             logger.warning("[ToolRouting] no tools allowed, falling back to text-only answer")
-        return await call(request)
+        return request.override(tools=filtered)
+
+    # ------------------------------------------------------------------ #
+    # 阶段 3：DSML 规范化
+    # ------------------------------------------------------------------ #
+    def _normalize_dsml(self, response) -> object:
+        """
+        检测 response 里的 DSML 块 → 解析 → 合并 → 尝试写回标准 tool_calls。
+
+        设计原则：
+          - 任何异常都不中断主链路（最多记日志 + 保留原始 response）。
+          - 优先写回 response.tool_calls（让框架正常执行）；
+            同时可选地剥离文本里的 DSML 原文，避免模型把它当正文复述。
+        """
+        # 3.1 取出模型输出的文本内容（兼容多种 response 结构）
+        text = self._extract_response_text(response)
+        if not DSMLParser.contains_dsml(text):
+            return response  # 没有 DSML，原样返回
+
+        # 3.2 解析
+        raw_calls = DSMLParser.parse(text)
+        if not raw_calls:
+            logger.debug("[DSML] detected DSML marker but parsed 0 calls; keep original")
+            return response
+
+        # 3.3 合并重复调用
+        if self.dsml_merge:
+            before = len(raw_calls)
+            raw_calls = merge_duplicate_calls(raw_calls)
+            if len(raw_calls) != before:
+                logger.info("[DSML] merged duplicate calls: %d → %d", before, len(raw_calls))
+
+        # 3.4 转成框架通用的 dict 结构 {name, arguments}
+        normalized = [
+            {"name": c.name, "arguments": c.arguments} for c in raw_calls
+        ]
+        logger.info("[DSML] normalized %d call(s): %s",
+                    len(normalized), [c["name"] for c in normalized])
+
+        # 3.5 写回 response（尽量用 override；字段名随 LangChain 版本而异）
+        response = self._inject_tool_calls(response, normalized)
+
+        # 3.6 可选：从正文里剥离 DSML 原文，防止被当作普通文本复述
+        if self.dsml_strip_from_text:
+            response = self._strip_dsml_from_response(response, text)
+
+        return response
+
+    def _inject_tool_calls(self, response, tool_calls: list[dict]) -> object:
+        """
+        把规范化后的 tool_calls 写回 response。
+        优先尝试 response.override(tool_calls=...)；失败则尝试直接赋值 / 设置属性。
+        （不同 LangChain 版本的 ModelResponse 字段名略有差异，此处做兼容。）
+        """
+        # 情况 A：支持 override（推荐路径，不可变）
+        override = getattr(response, "override", None)
+        if callable(override):
+            try:
+                return override(tool_calls=tool_calls)
+            except TypeError:
+                # override 不接受 tool_calls 关键字 → 退到情况 B
+                pass
+
+        # 情况 B：可直接设置属性（dataclass-like）
+        if hasattr(response, "tool_calls"):
+            try:
+                response.tool_calls = tool_calls
+                return response
+            except Exception:  # noqa
+                pass
+
+        # 情况 C：都失败 → 保留原始 response，仅记录（不中断链路）
+        logger.warning(
+            "[DSML] cannot inject tool_calls into response of type %s; "
+            "fallback to original response. tool_calls=%s",
+            type(response).__name__, tool_calls,
+        )
+        return response
+
+    def _strip_dsml_from_response(self, response, original_text: str) -> object:
+        """把正文里的 <｜｜DSML｜｜ calls>...</...calls> 块剥离，替换为简短占位。"""
+        cleaned = DSMLParser._CALLS_BLOCK.sub(
+            "\n[已解析的工具调用]\n", original_text
+        )
+        if cleaned == original_text:
+            return response
+
+        override = getattr(response, "override", None)
+        if callable(override):
+            try:
+                return override(content=cleaned)
+            except TypeError:
+                pass
+        if hasattr(response, "content"):
+            try:
+                response.content = cleaned
+                return response
+            except Exception:  # noqa
+                pass
+        return response
 
     # ------------------------------------------------------------------ #
     # 下面是抽取出来的公共逻辑（同步/异步共用，保证一致性）
@@ -121,22 +427,17 @@ class ToolRoutingMiddleware(AgentMiddleware):
         根据用户输入文本，算出『本次允许使用的工具名集合』。
         抽成独立方法，是为了让同步/异步两个入口都走同一份逻辑。
 
-        参数:
-            content: 用户最新一条消息的文本；取不到时为 None。
         返回:
-            - set[str]          ：允许的工具名集合（可为空 = 不给任何工具）
-            - None              ：路由失败 / 取不到有效内容，调用方应"放行全部"作为降级
+            - set[str] : 允许的工具名集合（可为空 = 不给任何工具）
+            - None     : 路由失败 / 取不到有效内容，调用方应"放行全部"作为降级
         """
-        # 取不到有效文本 → 保守降级：放行全部（宁可多给，别误杀）
         if not content:
             logger.debug("[ToolRouting] empty user content, fallback to all tools")
             return None
 
         try:
-            # select_tools 返回 List[BaseTool]（工具对象），取 .name 得到名字集合
             allowed = {tool.name for tool in select_tools(content)}
         except Exception as e:  # noqa
-            # 路由出错时不要硬挂掉整个请求，降级为"给全部工具"
             logger.exception("[ToolRouting] select_tools failed, fallback to all tools: %s", e)
             return None
 
@@ -146,46 +447,35 @@ class ToolRoutingMiddleware(AgentMiddleware):
         """
         从 request 里安全地取出『最近一条用户消息』的文本内容。
 
-        【关键：ModelRequest 的真实结构】
-        ---------------------------------
-        LangChain 1.3 的 ModelRequest 是 @dataclass，消息直接在 `request.messages`，
-        且里面的元素是 langchain 的 BaseMessage 对象（如 HumanMessage/AIMessage），
-        用 `.type` 区分角色、"user" 对应的是 `HumanMessage`（type == "human"）。
+        LangChain 1.3 的 ModelRequest 是 @dataclass，消息在 `request.messages`，
+        元素是 BaseMessage（HumanMessage/AIMessage），用 `.type` 区分角色，
+        "user" 对应的是 HumanMessage（type == "human"）。
 
         常见踩坑：
-           - ❌ request.input              → 根本没有这个属性，会 AttributeError
-           - ❌ msg["role"] / msg.role     → BaseMessage 用 .type，不是 .role
+           - ❌ request.input              → 没有这个属性
+           - ❌ msg["role"] / msg.role     → BaseMessage 用 .type
            - ❌ 假设 content 一定是 str     → 多模态时是 list[dict]
-
-        所以这里做了多重兼容：既能处理 BaseMessage 对象，也能处理裸 dict。
         """
-        # 1. 取消息列表：标准字段是 request.messages（list[BaseMessage]）
         messages = getattr(request, "messages", None)
         if not isinstance(messages, (list, tuple)):
-            # 极端兜底：万一未来结构变化，尝试其他位置
             logger.debug("[ToolRouting] request has no list-like .messages, fallback")
             return None
 
-        # 2. 倒序遍历，找最后一条用户消息
         for msg in reversed(messages):
-            # --- 判断角色：兼容 BaseMessage 对象 与 裸 dict 两种形态 ---
             if isinstance(msg, dict):
-                role = msg.get("role")                       # dict 形态："user"
+                role = msg.get("role")
                 content = msg.get("content", "")
             else:
-                # BaseMessage 对象：用 .type，"user" 消息的 type 是 "human"
                 msg_type = getattr(msg, "type", None)
-                role = "user" if msg_type == "human" else msg_type  # human→user 归一化
+                role = "user" if msg_type == "human" else msg_type
                 content = getattr(msg, "content", "")
 
             if role != "user":
                 continue
 
-            # 3. content 可能是 str，也可能是多模态 list[dict]
             if isinstance(content, str):
                 return content
             if isinstance(content, list):
-                # 多模态格式：[ {"type": "text", "text": "..."}, ... ]
                 texts = [
                     p.get("text", "")
                     for p in content
@@ -195,8 +485,36 @@ class ToolRoutingMiddleware(AgentMiddleware):
                 if joined:
                     return joined
 
-        # 找不到有效的用户文本 → 返回 None，上层降级为"放行全部工具"
         return None
+
+    def _extract_response_text(self, response) -> str:
+        """
+        从模型响应里取出文本内容，兼容多种结构：
+           - response.content (str / list)
+           - response["content"]
+           - response.text
+        取不到则返回 ""（不抛异常）。
+        """
+        # 对象属性
+        for attr in ("content", "text"):
+            val = getattr(response, attr, None)
+            if isinstance(val, str) and val:
+                return val
+            if isinstance(val, list):  # 多模态 content 列表
+                joined = "".join(
+                    p.get("text", "") for p in val
+                    if isinstance(p, dict) and p.get("type") == "text"
+                )
+                if joined:
+                    return joined
+
+        # dict 形态
+        if isinstance(response, dict):
+            val = response.get("content") or response.get("text")
+            if isinstance(val, str):
+                return val
+
+        return ""
 
 
 """
@@ -208,10 +526,29 @@ class ToolRoutingMiddleware(AgentMiddleware):
 
     agent = create_agent(
         model=...,
-        tools=all_tools,                 # 注册全部工具
-        middleware=[ToolRoutingMiddleware()],   # ← 挂上这个中间件即可
+        tools=all_tools,
+        middleware=[ToolRoutingMiddleware(
+            enable_dsml=True,        # 开启 DSML 检测/规范化
+            dsml_merge=True,         # 合并同一工具的重复调用（中/英文去重）
+            dsml_strip_from_text=True,
+        )],
     )
 
-    # 异步调用时，会自动走 awrap_model_call，embedding 在线程池里跑，不阻塞事件循环
     await agent.ainvoke({"input": "帮我查一下天气"})
+
+接入说明（重要）
+================
+1. DSML 规范化发生在「模型调用之后」。如果你的 LangChain 版本里，
+   ModelResponse 不支持 response.override(tool_calls=...)，
+   请检查日志中的 "[DSML] cannot inject tool_calls ..." 警告，
+   并按你的版本把 _inject_tool_calls 里的「情况 B/C」补上对应字段。
+
+2. 更彻底的方案是从模型侧禁用 DSML、走标准 function calling
+   （ollama 部署可配 tool_choice / format），从源头不产生 DSML。
+   本中间件的规范化逻辑可作为「兜底兼容层」长期保留。
+
+3. 建议先用一次请求打印验证：
+       logger.setLevel(logging.INFO)
+   观察是否出现 "[DSML] normalized N call(s): [...]" 日志，
+   确认写回是否生效；若未生效，按说明 1 调整字段名。
 """

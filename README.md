@@ -163,9 +163,78 @@ Pawer Gateway
 DeepSeek V4 API ← 纯黑盒，只收 prompt 出 text
 更优雅：做成"人格中间件"（每次请求动态注入） 如果你想让 system prompt 跟着每次请求走（而不是 agent 构建时固定死），可以用中间件在 before_model 里注入：
 
+- ### 图节点并行问题（如工具）
+1. 大多数 RAG 场景串行就够了： 
+- 原因 1：RAG 的瓶颈不在工具调用延迟
+- 向量检索：~50ms（Chroma，本地）
+- LLM 生成：~2-5s（取决于输出长度）
+- 联网搜索：~1-3s
+- 真正慢的是 LLM 生成，不是工具调用。并行省的那 1-2s 用户感知不明显。
+- 原因 2：串行让 LLM 有"纠错机会"
+- 并行：一次规划 3 个子查询 → 全部执行 → 发现第 2 个查错了 → 没法补救
+- 串行：查第 1 个 → 看到结果不对 → 换个问法再查 → 更鲁棒
+2. 两种并行策略： 
+- 语义路由 → 拆子查询 → 并行检索（asyncio）→ 合并结果 → 一次 LLM 生成
+- 注意：并行只放在"检索层"，不要并行 LLM 生成（没意义，生成必须串行）。
+- （复杂 Agent）： LangGraph 里定义：某些节点并行执行 → 汇聚节点合并 → 下一节点
+- 这是图计算框架的活，不是简单 asyncio 能 cover 的。
+
+3. 可并行（无串行依赖）的操作：
+- [联网搜索 ‖ RAG 检索]
+- [路由计算 ‖ Prompt 渲染]
+4. 两种并行实现方式
+- 方式 1：Agent 框架自动并行（LangChain AgentExecutor 支持）
+- 如果 LLM 一次输出多个工具调用（OpenAI 格式支持 parallel tool calls），AgentExecutor 可以并行执行：
+  - 方式 2：应用层手动并行（你控制更细）
+  - 
+        import asyncio
+        async def parallel_retrieve(queries):
+            tasks = [asyncio.to_thread(retriever.invoke, q) for q in queries]
+            results = await asyncio.gather(*tasks)
+            return results
+        
+        #用户问题拆成子查询
+        sub_queries = ["部署流程", "回滚方案"]
+        docs = asyncio.run(parallel_retrieve(sub_queries))
+        #合并后一次性喂给 LLM 生成
+5. 优化策略（按 ROI 排序）：
+- 联网 + RAG 并行（省 50ms，心理安慰为主）
+- （已做）流式输出：LLM 一边生成一边返回给前端，用户感知延迟从 5s → 1s（体感最大提升！）
+- 预检索：用户打字时就发起检索
+- 缓存：相同 query 的检索结果 + LLM 回答缓存
+6. 工业级 Agent 的做法——"路由后扇出，不互相依赖的工具分支并行，汇聚后再进 LLM"。
+
+7. 关于关键路径：
+> Plan-and-Execute     先规划再执行，规划用小模型、执行用大模型
+> LLMCompiler    LLM 输出"任务图"，编译器自动并行无依赖任务
+- 规划的价值：把能并行的都甩到非关键路径上。
+- 简单问题（"部署流程是什么"→ 一次 RAG 就够）也走全套规划，反而更慢更贵。
+- 对策：Fast Path 短路
+>       query → 先过一个极简分类器
+>       ├─ 简单（单工具）→ 直接执行，跳过 Planner
+>       └─ 复杂（多子查询/多源）→ 才进 Planner
+- 静态规划 vs 动态修正
+Planner 一开始定的图，执行中发现"T1 结果不够，需要补搜"怎么办？
+- 对策：允许 Plan 中途追加节点（动态 DAG）。LLMCompiler 的做法是：执行过程中若某任务输出触发"需要更多信息"，往图里插入新节点，重新拓扑调度。这是进阶功能，初期可以先做"失败重试"就够了。
+
+8. 未来并行扇出的正确架构
+>       用户 query
+>           │
+>           ▼
+>       [tool_router]  ──→  scores / selected / tools
+>           │
+>           ▼  （编排层：确定性扇出）
+>       fanout(query, selected_tools):
+>           tasks = [call_tool(t, build_arg(query)) for t in selected_tools]
+>           results = await asyncio.gather(*tasks)   # ← 真正的并行在这里
+>           return merge(results)
+>           │
+>           ▼
+>       汇聚结果 → 喂回模型生成最终回答
+
 ---
 
 # 费用
-- 模型调用：deepseek-v4-flash
+- 模型调用：deepseek-v4-flash（Flash 命中 0.02 元/M，未命中 1 元/M）
 - 网络搜索：博查 ¥0.036 / 次（即 ¥36 / 千次），可购买资源包
 - 网络搜索：tavily

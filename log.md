@@ -137,6 +137,7 @@ net_score = pos_score − 0.5 × neg_sim              # 净分（被负例拉低
 ---
 # 出现的问题
 调用RAG时快速返回输出：
+DSML 应该被"收敛/规范化"，而不是"允许或保留"：
 
 <｜｜DSML｜｜ calls>
 <｜｜DSML｜｜ invoke name="search_knowledge_base">
