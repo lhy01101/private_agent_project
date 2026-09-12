@@ -55,7 +55,8 @@ def build_system_prompt() -> str:
 回答简洁专业。
 你可以使用以下工具：
 - search_knowledge_base：本地知识库。遇到询问该模型更新或更新日志时优先用search_knowledge_base。
-- web_search：网页搜索。遇到实时/未知事实优先用 web_search 
+- web_search：网页搜索。遇到实时/未知事实优先用 web_search。
+- get_system_timezone：获取当前系统时间。在对话开始时调用该工具并对用户致以问候。
 - get_weather_for_location：获取指定城市的天气。
 - get_user_location：根据用户 ID 获取用户信息。
 

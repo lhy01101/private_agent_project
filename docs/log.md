@@ -127,15 +127,17 @@
 ##  9月10日日志
 - 添加工具timezone
 - 添加了工具提示词的负例机制
+- 大幅提高了工具调用速度和正确率（具体原因去看optimize.md 三、）
 打分逻辑从单一"正分"变成：正分 − 负分抑制：
 pos_score = 0.7 × example_sim + 0.3 × desc_sim     # 正例 + 描述（和原来一样）
 neg_sim   = 与 negative_examples 的最大余弦相似度   # 新增：越像负例越高
 net_score = pos_score − 0.5 × neg_sim              # 净分（被负例拉低）
-- 大幅提高了工具调用速度和正确率（具体原因去看optimize.md 三、）
+- 将项目push到git上
 
 ---
 # 出现的问题
-调用RAG时快速返回输出：
+1. 调用RAG时快速返回输出：（已经在一定程度上解决，提示词限制+中间件拦截（但是中间件貌似没起作用））
+DSML 应该被"收敛/规范化"，而不是"允许或保留"：
 
 <｜｜DSML｜｜ calls>
 <｜｜DSML｜｜ invoke name="search_knowledge_base">
@@ -146,15 +148,25 @@ net_score = pos_score − 0.5 × neg_sim              # 净分（被负例拉低
 </｜｜DSML｜｜ invoke>
 </｜｜DSML｜｜ calls>
 
+<｜｜DSML｜｜ calls>
+<｜｜DSML｜｜ invoke name="web_search">
+<｜｜DSML｜｜ parameter name="query" string="true">iPhone 18 发布 价格 配置</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+<｜｜DSML｜｜ invoke name="web_search">
+<｜｜DSML｜｜ parameter name="query" string="true">iPhone 18 release date specs price 2026</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+</｜｜DSML｜｜ calls>
+
 
 ---
 # **方向调整**：
 ## 可选方向
-- 人格：角色性格、角色身份（拼进prompt）
-- 记忆：用户角色、对话记忆
-- 工具语义路由（用向量距离选管线），分出不同工具管线，实现多步骤协作
+- 能够操作文件的工具
+- 对话记忆：按日期分，把重点对话和主动记忆放入本地文档
+- 先搞一个简单的fastapi界面？然后再加上文件输入和多轮对话功能
+- 记忆：用户角色、对话记忆（长期对话保依赖服务器运行吗？我需要实现记忆主动写入文档）
 - 用FastAPI做页面，异步处理
 - 动态系统提示（根据用户输入选择提示词）
-- 循环+规则判断
+- 循环+规则判断，实现多步骤协作（AgentExecutor/langGraph）
 - AI询问用户的能力
 - 小灵感：模拟主动输出的算法：特定时段/情感需求期/聊天后置时段 的特定输入或者空白输入，输入时根据近期细节记忆，向用户主动发出聊天邀请

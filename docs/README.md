@@ -217,6 +217,20 @@ DeepSeek V4 API ← 纯黑盒，只收 prompt 出 text
 Planner 一开始定的图，执行中发现"T1 结果不够，需要补搜"怎么办？
 - 对策：允许 Plan 中途追加节点（动态 DAG）。LLMCompiler 的做法是：执行过程中若某任务输出触发"需要更多信息"，往图里插入新节点，重新拓扑调度。这是进阶功能，初期可以先做"失败重试"就够了。
 
+8. 未来并行扇出的正确架构
+>       用户 query
+>           │
+>           ▼
+>       [tool_router]  ──→  scores / selected / tools
+>           │
+>           ▼  （编排层：确定性扇出）
+>       fanout(query, selected_tools):
+>           tasks = [call_tool(t, build_arg(query)) for t in selected_tools]
+>           results = await asyncio.gather(*tasks)   # ← 真正的并行在这里
+>           return merge(results)
+>           │
+>           ▼
+>       汇聚结果 → 喂回模型生成最终回答
 
 ---
 
