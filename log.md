@@ -146,6 +146,7 @@ net_score = pos_score − 0.5 × neg_sim              # 净分（被负例拉低
 ## 9月14日日志
 - 调整了chunk_size与chunk_overlap，以适应碎片化文本
 - markdown文本可以考虑结构化切分方式
+- 测试结果良好，但是比较脆弱，依赖上下文
 
 ---
 # 出现的问题
