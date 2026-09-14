@@ -1,17 +1,17 @@
 ## 技术路径
 
-- ### 大模型输出
+### 大模型输出
 - result["messages"] = history + [user_new, ai_new, tool_new, ai_final]
 - prev_len = 0 # 用来记录上一次的消息数量 
 - 只打印新增的消息 
 - new_messages = result["messages"][prev_len:]
 - prev_len = len(result["messages"])
 
-- ### 添加记忆
+### 添加记忆
 - from langgraph.checkpoint.memory import InMemorySaver 
 - 使用checkpointer = InMemorySaver()
 
-- ### 循环+规则判断
+### 循环+规则判断
   - "自己发现错误并换路子"的意愿和智力在模型里，"能不能继续跑下去"的机制在人写的循环里。真正的 Agent 能力 = 模型的推理 × 框架的持久化执行。
   - 如果你在考虑自己搭 Agent 框架，这个分工决定了：调优时策略质量改 prompt 和模型，稳定性和鲁棒性改循环逻辑和异常处理。两边问题容易混，定位时要先分清是哪层的事。
   - 实际工程里的推荐路径：
@@ -28,7 +28,7 @@
     *↓ 最后才考虑*
 *第四层：RL/RLHF on trajectory（成本高，一般团队不碰）*
 
-- ### 语义路由（分层调模型/工具）
+### 语义路由（分层调模型/工具）
 - 为什么做语义路由+Agent管线：工具越多，Agent 越慢越贵；工具太多 → LLM 选错；控制力：有些事你不想让 LLM 自己决定
 - Agent 管线：把"回答问题"从"一步到位"变成"多步骤协作"，能处理复杂任务 ；语义路由：Agent 的"前台调度员"，用零成本的向量距离决定走哪条管线，避免工具爆炸 + 省钱 + 提准确率
 - 也就是说我想给什么工具的时候我再给LLM，而不是一开始就塞20个工具进去，通过语义路由（是不是也类似RAG embedding的retrieve来选择工具？），在具体提问时选择部分工具交给LLM，相当于一定程度上解决了agent工具调用的问题
@@ -54,7 +54,7 @@
 - - 多选 = 组合工具（如 rag_tool_1 + web_search）
 - - 低于阈值 → 不暴露任何工具 → 直接回答（省钱）
 
-- ### DeepSeek V4-Flash 的“缓存命中”到底是什么？
+### DeepSeek V4-Flash 的“缓存命中”到底是什么？
 - 它做的是 Prompt Cache（前缀 KV 缓存），不是语义缓存，也不是工具路由：
 - 机制：你发请求时，从第一个 token 开始的前缀如果和之前某次请求逐字节完全一致，服务端就复用之前算好的 KV 中间状态，不再重算 prefill
 - 计费：命中部分按 prompt_cache_hit_tokens 算，价格约是未命中的 1/50（Flash 命中 0.02 元/M，未命中 1 元/M）
@@ -70,7 +70,7 @@
 - - 禁止在 system 里塞 时间戳 / session_id / 随机 trace_id
 - - 工具列表用固定顺序序列化（dict 别乱迭代）
 
-- ### 联网搜索机制
+### 联网搜索机制
 - 用户问 → ① 调 Bing/Google API（**关键词检索**/query 改写后的关键词）
 - → ② 拿到 Top 10 网页 URL + 快照
 - → ③ 爬正文、清 HTML、**分块**
@@ -80,14 +80,14 @@
 - → ⑦ 可选 rerank
 - → ⑧ LLM 生成
 
-- ### Rerank / 重排 API
+### Rerank / 重排 API
 - 输入"1 个 query + N 条已检索到的候选文本"，输出这 N 条重新打分后的顺序。​ 它不联网、不找新东西，只在你给的那堆里挑。
 - 典型：Cohere Rerank、Jina Rerank、BGE-Reranker（本地）
 - 调用形态：rerank(query=..., documents=[cand1, cand2, ...], top_n=5) → 返回重排后的 index + relevance_score
 - 模型机制是 cross-encoder：把 query 和每条 candidate 拼在一起过一遍 transformer，比向量检索（bi-encoder 各算各的）精度高很多，但慢，所以只跑在"第一轮已经捞出的 top50 候选"上
 - query → 向量库/搜索API 捞 top50（快，保召回） → Rerank 精排成 top5（准） → 喂 LLM
 
-- ### RAG机制
+### RAG机制
 - 将文本进行对齐（embedding），就是把“人话”和“文档”翻译成同一种“数学语言”，让它们能在同一个向量空间里比距离。
 - Embedding 模型（如bge-m3）是怎么“学会对齐”的？
 这是关键——embedding 模型是“被训练过”的，专门为了对齐查询和文档。
@@ -121,7 +121,7 @@
 把 (查询, 文档) 当成一对，直接过一遍 Cross-Encoder，输出一个"相关分数"
 - 计算向量相似度得到的 top50进行重排序，返回top10，取top3进行输出
 
-- ### 多 Agent 协作解决的四个核心问题
+### 多 Agent 协作解决的四个核心问题
 
 1. **关注点分离 → 解决"角色冲突"：**
 一个 Agent 既要当研究员又要当审稿人，等于让同一个人又写又审，自我批评力度天然弱。拆成 Researcher + Critic，对抗式博弈能把事实错误率显著压低（典型如 debate / self-refine 架构）。
@@ -151,7 +151,7 @@ Orchestrator 可以重试单个 Worker、做投票/仲裁、设超时降级。�
   |awrap_tool_call|异步工具调用拦截|
   - 不是每个都必须有，只用异步就只写 async 版本没问题。
   
-- ### agent人格
+### agent人格
 Pawer Gateway
    │  每次发请求前，把这一堆拼进 system prompt：
    │    ├─ AGENTS.md（工作手册：规则、记忆用法、红线）
@@ -163,7 +163,7 @@ Pawer Gateway
 DeepSeek V4 API ← 纯黑盒，只收 prompt 出 text
 更优雅：做成"人格中间件"（每次请求动态注入） 如果你想让 system prompt 跟着每次请求走（而不是 agent 构建时固定死），可以用中间件在 before_model 里注入：
 
-- ### 图节点并行问题（如工具）
+### 图节点并行问题（如工具）
 1. 大多数 RAG 场景串行就够了： 
 - 原因 1：RAG 的瓶颈不在工具调用延迟
 - 向量检索：~50ms（Chroma，本地）
@@ -232,9 +232,21 @@ Planner 一开始定的图，执行中发现"T1 结果不够，需要补搜"怎�
 >           ▼
 >       汇聚结果 → 喂回模型生成最终回答
 
+### Markdown 切分思路
+一个可直接用的 Markdown 切分思路（经验值）
+text
+1. 先按 # / ## / ### 拆
+2. 每个 section：
+   - < 200 token → 不切
+   - 200–600 → 一个 chunk
+   - > 600 → 按段落切
+3. overlap 只在“长段落切分”时用
+4. 列表 / 表格 / 定义块：不切
+5. 总结：Markdown 不要先想 chunk_size，先想结构；碎片化文档不要硬拼，小 chunk + 父子结构是王道。
+
 ---
 
-# 费用
+## 费用
 - 模型调用：deepseek-v4-flash（Flash 命中 0.02 元/M，未命中 1 元/M）
 - 网络搜索：博查 ¥0.036 / 次（即 ¥36 / 千次），可购买资源包
 - 网络搜索：tavily

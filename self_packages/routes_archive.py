@@ -156,7 +156,31 @@ ROUTES = {
         ],
         "tools": ["get_system_timezone"]
     },
-
+    "direct_answer": {
+        "description": "用户消息属于闲聊寒暄、情感表达、主观观点、通用常识、简单算术、或明确只需模型自身知识即可回答的内容，不需要查询任何外部工具。",
+        "examples": [
+            "哈哈哈笑死",
+            "你好呀",
+            "今天心情不错",
+            "讲个笑话",
+            "你觉得人工智能未来会怎样",
+            "帮我写一首诗",
+            "1+1等于几",
+            "谢谢",
+            "再见",
+            "你叫什么名字",
+            "how are you",
+        ],
+        "negative_examples": [
+            "今天几号了",          # → system_timezone
+            "iPhone 18 多少钱",     # → web
+            "项目的 API 怎么用",    # → rag_1
+            "北京今天天气",         # → web
+            "帮我查一下最新新闻",   # → web
+        ],
+        "tools": [],               # ← 关键：这个路由不对应任何工具
+        "exclusive_with": ["web", "rag_1", "rag_2", "system_timezone"],
+    },
     # —— 组合路由（显式，用于需要多源的复杂问题）——
     "rag1_plus_web": {
         # 【重点增强】组合路由要与两个单路由竞争，description 必须强区分：

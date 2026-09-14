@@ -138,6 +138,8 @@ def make_app() -> gr.Blocks:
             examples=[
                 "你好，介绍一下你自己",
                 "帮我查看本地模型的更新日志",
+                "看时间",
+                "下午好",
             ],
             inputs=msg,
         )

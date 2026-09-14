@@ -15,8 +15,8 @@ DOCS_DIR = PROJECT_ROOT / "docs"
 PERSIST_DIR = PROJECT_ROOT/ "chroma_rag"
 # 增量更新必须保证以下几项与原rag一致
 EMBED_MODEL = "nomic-embed-text"
-CHUNK_SIZE = 800
-CHUNK_OVERLAP = 120
+CHUNK_SIZE = 400
+CHUNK_OVERLAP = 50
 
 # 记录文件状态的元数据文件（存每个文件的相对路径 + mtime）
 STATE_FILE = Path(PERSIST_DIR) / "file_state.json"
