@@ -22,4 +22,5 @@ dependencies = [
     "python-dotenv>=1.2.3",
     "sentence-transformers>=6.0.1",
     "tavily>=1.1.0",
+    "tree-sitter>=0.26.0",
 ]
