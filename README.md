@@ -1,252 +1,237 @@
-## 技术路径
+# Agent Tool Routing & RAG
 
-### 大模型输出
-- result["messages"] = history + [user_new, ai_new, tool_new, ai_final]
-- prev_len = 0 # 用来记录上一次的消息数量 
-- 只打印新增的消息 
-- new_messages = result["messages"][prev_len:]
-- prev_len = len(result["messages"])
-
-### 添加记忆
-- from langgraph.checkpoint.memory import InMemorySaver 
-- 使用checkpointer = InMemorySaver()
-
-### 循环+规则判断
-  - "自己发现错误并换路子"的意愿和智力在模型里，"能不能继续跑下去"的机制在人写的循环里。真正的 Agent 能力 = 模型的推理 × 框架的持久化执行。
-  - 如果你在考虑自己搭 Agent 框架，这个分工决定了：调优时策略质量改 prompt 和模型，稳定性和鲁棒性改循环逻辑和异常处理。两边问题容易混，定位时要先分清是哪层的事。
-  - 实际工程里的推荐路径：
-*第一层：system prompt + few-shot*
-    *↓ 效果不够*
-*第二层：框架层兜底（循环里加规则判断）*
-  - *连续相同 action → 强制打断，注入"你重复了，必须换策略"*
-  - *特定 error → 代码直接给 hint 塞回 context*
-  - *步数超阈值 → 强制输出"当前方案不可行，请重新规划"*
-    *↓ 还是不够*
-*第三层：针对特定子任务做 SFT（不是全 agent 循环微调）*
-  - *只微调"看报错→改参数"这个子步骤*
-  - *其他步骤仍用通用模型*
-    *↓ 最后才考虑*
-*第四层：RL/RLHF on trajectory（成本高，一般团队不碰）*
-
-### 语义路由（分层调模型/工具）
-- 为什么做语义路由+Agent管线：工具越多，Agent 越慢越贵；工具太多 → LLM 选错；控制力：有些事你不想让 LLM 自己决定
-- Agent 管线：把"回答问题"从"一步到位"变成"多步骤协作"，能处理复杂任务 ；语义路由：Agent 的"前台调度员"，用零成本的向量距离决定走哪条管线，避免工具爆炸 + 省钱 + 提准确率
-- 也就是说我想给什么工具的时候我再给LLM，而不是一开始就塞20个工具进去，通过语义路由（是不是也类似RAG embedding的retrieve来选择工具？），在具体提问时选择部分工具交给LLM，相当于一定程度上解决了agent工具调用的问题
-
-
-*一个基本的流程：*
-- *用户问题*
-- *用 bge-m3 做语义路由（选知识库）   ← 快，CPU 跑*
-- *用 bge-m3 检索文档 chunk            ← 向量库*
-- *用 bge-reranker 精排 top3(对于RAG就是top3文本，对于Agent管线就是top3工具)          ← CPU*
-- *用 Qwen2.5-7B（GPU）生成答案        ← 只干一件事：说人话*
-
-*设计思路*
-- 用户问题
-- embed（复用 nomic-embed-text，离线、免费）
-- 与每个"路由"的示例句做余弦相似度
-- 取 ≥ threshold 的路由（支持多选 → 组合工具）
-- 汇总成工具列表 [rag_tool_1, web_search, ...]
-- 只把这些工具交给 agent
-- - 关键点：
-- - 每个路由 = 一组示例句 + 对应工具（或工具组合）
-- - 向量距离 = 示例句的 embedding 与 query 的最大余弦相似度
-- - 多选 = 组合工具（如 rag_tool_1 + web_search）
-- - 低于阈值 → 不暴露任何工具 → 直接回答（省钱）
-
-### DeepSeek V4-Flash 的“缓存命中”到底是什么？
-- 它做的是 Prompt Cache（前缀 KV 缓存），不是语义缓存，也不是工具路由：
-- 机制：你发请求时，从第一个 token 开始的前缀如果和之前某次请求逐字节完全一致，服务端就复用之前算好的 KV 中间状态，不再重算 prefill
-- 计费：命中部分按 prompt_cache_hit_tokens 算，价格约是未命中的 1/50（Flash 命中 0.02 元/M，未命中 1 元/M）
-- 关键约束：是“精确前缀匹配”，不是语义相似匹配。系统提示词里加个 "今天是2026-09-06"、工具顺序变一下、RAG 召回文档顺序变一下 → 前缀断了 → 缓存失效
-- 默认开启，不用你写代码，但命中率完全取决于你怎么排 prompt
-- 所以它省的是：“同一段长系统提示 / 同一份固定工具 schema / 同一段不变上下文”被反复发给模型时，输入侧重算的钱和延迟。
-- 语义路由解决什么： 20 个工具里挑 3 个给 LLM，降决策错误率+省 token
-- DeepSeek Prompt Cache解决什么：选定工具后，系统提示/工具 schema 不变 → 省 prefill 钱
-- Prompt Cache：**不用“做”，但要“顺手蹭”**
-- - 你不需要写缓存代码，但prompt 排版不对 = 命中率 0：
-- - 稳定内容放最前：system 提示 → 工具 schema（排序固定）→ 固定参考文档
-- - 动态内容放最后：检索到的 chunk → 多轮 history → 当前用户问题
-- - 禁止在 system 里塞 时间戳 / session_id / 随机 trace_id
-- - 工具列表用固定顺序序列化（dict 别乱迭代）
-
-### 联网搜索机制
-- 用户问 → ① 调 Bing/Google API（**关键词检索**/query 改写后的关键词）
-- → ② 拿到 Top 10 网页 URL + 快照
-- → ③ 爬正文、清 HTML、**分块**
-- → ④ 每块 bge-m3 **embedding**（动态，不预存）
-- → ⑤ 用户 query 也 embedding
-- → ⑥ 向量检索 Top-3 块
-- → ⑦ 可选 rerank
-- → ⑧ LLM 生成
-
-### Rerank / 重排 API
-- 输入"1 个 query + N 条已检索到的候选文本"，输出这 N 条重新打分后的顺序。​ 它不联网、不找新东西，只在你给的那堆里挑。
-- 典型：Cohere Rerank、Jina Rerank、BGE-Reranker（本地）
-- 调用形态：rerank(query=..., documents=[cand1, cand2, ...], top_n=5) → 返回重排后的 index + relevance_score
-- 模型机制是 cross-encoder：把 query 和每条 candidate 拼在一起过一遍 transformer，比向量检索（bi-encoder 各算各的）精度高很多，但慢，所以只跑在"第一轮已经捞出的 top50 候选"上
-- query → 向量库/搜索API 捞 top50（快，保召回） → Rerank 精排成 top5（准） → 喂 LLM
-
-### RAG机制
-- 将文本进行对齐（embedding），就是把“人话”和“文档”翻译成同一种“数学语言”，让它们能在同一个向量空间里比距离。
-- Embedding 模型（如bge-m3）是怎么“学会对齐”的？
-这是关键——embedding 模型是“被训练过”的，专门为了对齐查询和文档。
-训练时它在学什么？
-用一个简化版的对比学习（Contrastive Learning）例子：
-训练样本：
-  查询：怎么退钱
-  正样本：退款流程说明
-  负样本：猫为什么爱睡觉
-训练目标：
-让“怎么退钱”的向量 和 “退款流程说明”的向量 靠近
-让“怎么退钱”的向量 和 “猫为什么爱睡觉”的向量 远离
-经过海量这样的三元组训练后，模型就学会了：
-“退钱” ≈ “退款” ≈ “退货” ≈ “返款”
-这就是对齐——把不同表述但同义的东西，压到向量空间里相近的位置。
-- 计算向量相似度，返回top50~top100，（只靠相似度不够准确）
-- 为什么查询和文档要用“同一个”embedding 模型？
-这是很多人忽略的点：
-查询和文档必须用同一个 embedding 模型，否则向量空间不同，距离没意义。
-类比：
-你用中文翻译把“hello”翻成“你好”
-你用日语翻译把“world”翻成“世界”
-然后问：中文“你好”和日语“世界”距离近不近？
-没法比，因为翻译规则不同，空间不同
-所以：
-文档入库时：用 bge-m3 向量化
-用户查询时：也必须用同一个 bge-m3​ 向量化
-这样两边才在同一个空间里，距离才有意义
-- 为什么需要重排序？问题在于：压缩过程中丢掉了词序、重点、细粒度匹配信号。
-- 重排序不用"压缩成向量"，而是：
-把 (查询, 文档) 当成一对，直接过一遍 Cross-Encoder，输出一个"相关分数"
-- 计算向量相似度得到的 top50进行重排序，返回top10，取top3进行输出
-
-### 多 Agent 协作解决的四个核心问题
-
-1. **关注点分离 → 解决"角色冲突"：**
-一个 Agent 既要当研究员又要当审稿人，等于让同一个人又写又审，自我批评力度天然弱。拆成 Researcher + Critic，对抗式博弈能把事实错误率显著压低（典型如 debate / self-refine 架构）。
-
-2. **上下文隔离 → 解决"长链路污染"：**
-每个子 Agent 只拿自己那段的上下文，主 Agent 只汇总结论。百万级长任务里，这比把所有东西塞进一个窗口更稳也更省 token。
-
-3. **并行 + 专业化 → 解决"吞吐与深度不可兼得"：**
-并行：多个 Worker 同时查不同数据源，时延从串行 O(n) 降到 O(1)；
-专业化：每个 Agent 配专属工具集和 system prompt（法律 Agent / 代码 Agent / 数据 Agent），比"通才 prompt"效果好得多。
-
-4. **容错与可控 → 解决"一步错全盘崩"：**
-Orchestrator 可以重试单个 Worker、做投票/仲裁、设超时降级。单 Agent 一旦在某步跑偏，只能靠反思硬拉回来。
-
-- **经验法则**：能用单 Agent + 好工具解决的事，就不要拆。只有当任务同时满足 ① 可自然拆分、② 子任务可并行/专业化、③ 对准确率或时延敏感​ 时，多 Agent 的收益才明显大于成本。
-
-- ### 中间件
-- wrap_model_call 是干嘛的？每个中间件都必须有吗？
-- wrap_model_call 是同步版本的中间件钩子。当你的 agent 在同步上下文中调用模型时走这个方法；awrap_model_call 是异步版本的钩子，agent 在 async 上下文中走这个。
-  - LangChain 的 AgentMiddleware 基类定义了这些方法作为可选钩子：
-  
-  | 钩子 |用途|
-  |-----|:----------------:|
-  |wrap_model_call|同步模型调用拦截|
-  |awrap_model_call |异步模型调用拦截|
-  |wrap_tool_call|同步工具调用拦截|
-  |awrap_tool_call|异步工具调用拦截|
-  - 不是每个都必须有，只用异步就只写 async 版本没问题。
-  
-### agent人格
-Pawer Gateway
-   │  每次发请求前，把这一堆拼进 system prompt：
-   │    ├─ AGENTS.md（工作手册：规则、记忆用法、红线）
-   │    ├─ SOUL.md（人格：方塘的性格、说话风格）  ← 主人看的"性格文档"
-   │    ├─ IDENTITY.md（身份：名字、物种、设定）
-   │    ├─ USER.md + MEMORY.md（记忆）
-   │    └─ 相关记忆片段（Active Memory 检索出来的）
-   ▼
-DeepSeek V4 API ← 纯黑盒，只收 prompt 出 text
-更优雅：做成"人格中间件"（每次请求动态注入） 如果你想让 system prompt 跟着每次请求走（而不是 agent 构建时固定死），可以用中间件在 before_model 里注入：
-
-### 图节点并行问题（如工具）
-1. 大多数 RAG 场景串行就够了： 
-- 原因 1：RAG 的瓶颈不在工具调用延迟
-- 向量检索：~50ms（Chroma，本地）
-- LLM 生成：~2-5s（取决于输出长度）
-- 联网搜索：~1-3s
-- 真正慢的是 LLM 生成，不是工具调用。并行省的那 1-2s 用户感知不明显。
-- 原因 2：串行让 LLM 有"纠错机会"
-- 并行：一次规划 3 个子查询 → 全部执行 → 发现第 2 个查错了 → 没法补救
-- 串行：查第 1 个 → 看到结果不对 → 换个问法再查 → 更鲁棒
-2. 两种并行策略： 
-- 语义路由 → 拆子查询 → 并行检索（asyncio）→ 合并结果 → 一次 LLM 生成
-- 注意：并行只放在"检索层"，不要并行 LLM 生成（没意义，生成必须串行）。
-- （复杂 Agent）： LangGraph 里定义：某些节点并行执行 → 汇聚节点合并 → 下一节点
-- 这是图计算框架的活，不是简单 asyncio 能 cover 的。
-
-3. 可并行（无串行依赖）的操作：
-- [联网搜索 ‖ RAG 检索]
-- [路由计算 ‖ Prompt 渲染]
-4. 两种并行实现方式
-- 方式 1：Agent 框架自动并行（LangChain AgentExecutor 支持）
-- 如果 LLM 一次输出多个工具调用（OpenAI 格式支持 parallel tool calls），AgentExecutor 可以并行执行：
-  - 方式 2：应用层手动并行（你控制更细）
-  - 
-        import asyncio
-        async def parallel_retrieve(queries):
-            tasks = [asyncio.to_thread(retriever.invoke, q) for q in queries]
-            results = await asyncio.gather(*tasks)
-            return results
-        
-        #用户问题拆成子查询
-        sub_queries = ["部署流程", "回滚方案"]
-        docs = asyncio.run(parallel_retrieve(sub_queries))
-        #合并后一次性喂给 LLM 生成
-5. 优化策略（按 ROI 排序）：
-- 联网 + RAG 并行（省 50ms，心理安慰为主）
-- （已做）流式输出：LLM 一边生成一边返回给前端，用户感知延迟从 5s → 1s（体感最大提升！）
-- 预检索：用户打字时就发起检索
-- 缓存：相同 query 的检索结果 + LLM 回答缓存
-6. 工业级 Agent 的做法——"路由后扇出，不互相依赖的工具分支并行，汇聚后再进 LLM"。
-
-7. 关于关键路径：
-> Plan-and-Execute     先规划再执行，规划用小模型、执行用大模型
-> LLMCompiler    LLM 输出"任务图"，编译器自动并行无依赖任务
-- 规划的价值：把能并行的都甩到非关键路径上。
-- 简单问题（"部署流程是什么"→ 一次 RAG 就够）也走全套规划，反而更慢更贵。
-- 对策：Fast Path 短路
->       query → 先过一个极简分类器
->       ├─ 简单（单工具）→ 直接执行，跳过 Planner
->       └─ 复杂（多子查询/多源）→ 才进 Planner
-- 静态规划 vs 动态修正
-Planner 一开始定的图，执行中发现"T1 结果不够，需要补搜"怎么办？
-- 对策：允许 Plan 中途追加节点（动态 DAG）。LLMCompiler 的做法是：执行过程中若某任务输出触发"需要更多信息"，往图里插入新节点，重新拓扑调度。这是进阶功能，初期可以先做"失败重试"就够了。
-
-8. 未来并行扇出的正确架构
->       用户 query
->           │
->           ▼
->       [tool_router]  ──→  scores / selected / tools
->           │
->           ▼  （编排层：确定性扇出）
->       fanout(query, selected_tools):
->           tasks = [call_tool(t, build_arg(query)) for t in selected_tools]
->           results = await asyncio.gather(*tasks)   # ← 真正的并行在这里
->           return merge(results)
->           │
->           ▼
->       汇聚结果 → 喂回模型生成最终回答
-
-### Markdown 切分思路
-一个可直接用的 Markdown 切分思路（经验值）
-text
-1. 先按 # / ## / ### 拆
-2. 每个 section：
-   - < 200 token → 不切
-   - 200–600 → 一个 chunk
-   - > 600 → 按段落切
-3. overlap 只在“长段落切分”时用
-4. 列表 / 表格 / 定义块：不切
-5. 总结：Markdown 不要先想 chunk_size，先想结构；碎片化文档不要硬拼，小 chunk + 父子结构是王道。
+一个从零搭建的个人 Agent 项目：支持**工具调用、联网搜索、RAG 知识库检索、多轮记忆**，并围绕"工具过多容易选错"这一核心痛点，设计并实现了一套**基于语义距离的工具路由层**。
 
 ---
 
-## 费用
-- 模型调用：deepseek-v4-flash（Flash 命中 0.02 元/M，未命中 1 元/M）
-- 网络搜索：博查 ¥0.036 / 次（即 ¥36 / 千次），可购买资源包
-- 网络搜索：tavily
+## 为什么写这个项目
+
+大语言模型通过 function calling 使用工具，但当工具数量变多、描述相似时，**模型经常选错工具**——这是所有 Agent 落地都会撞上的墙。
+
+主流解法是靠提示词硬撑，或者人工写 if/elif 分发。前者不稳定，后者不可扩展。
+
+我的思路是：**让 query 自己做路由**。把用户提问做一次 embedding，计算它与每个工具描述的语义距离，按分数自动选工具。这样新增工具只需补一条描述，调用方零改动。
+
+---
+
+## 功能特性
+
+- [x] **工具语义路由**：基于 embedding 相似度自动选择工具，替代手工 if/elif
+- [x] **负例抑制机制**：打分从单一"正分"升级为 `正分 − 负分`，显著降低误绑率
+- [x] **兜底 + 底线**：保证工具集永不为空，同时用 `fallback_min_net` 防止"什么都强制绑工具"
+- [x] **网络搜索语义路由**：博查 / Tavily / DuckDuckGo 多供应商，按语种与可用性自动切换
+- [x] **RAG 检索 + Cross-Encoder 重排序**：top50 粗排 → cross-encoder 精排回 top3
+- [x] **增量索引**：`build_index.py` 只处理新增/变更文件，无需全量重建
+- [x] **多轮记忆**：基于 checkpointer 的短期记忆
+- [x] **流式输入输出**：Gradio 网页端实时对话
+- [x] **动态模型选择中间件**：运行时按策略切换底层模型
+- [ ] 跨对话长期记忆（主动写入本地文档）—— *进行中*
+- [ ] Agent 文件读写能力（"不仅能读，还要能写"）—— *规划中*
+
+---
+
+## 项目结构
+
+```
+RAG/
+├── wonder_agent.py            ★ Agent 装配入口（唯一 create_agent 的地方）
+├── web_chat_box.py            ★ Gradio 网页入口（uv run python web_chat_box.py → :7860）
+├── pyproject.toml / uv.lock     uv 管理依赖，Python 3.12
+│
+├── self_packages/             ★ 核心功能包
+│   ├── tools.py                 工具池汇总（唯一注册点）
+│   ├── dynamic_select.py        basic/advanced 模型 + DynamicModelMiddleware
+│   ├── tool_routing_middleware.py  ToolRoutingMiddleware（按语义裁剪工具）
+│   ├── tool_router.py           SemanticToolRouter（embedding 打分路由引擎）
+│   ├── routes_archive.py        路由表 ROUTES（7 条路由的语料/负例/互斥/工具映射）
+│   ├── prompts.py               【人格】+ 工具规则拼装 system prompt
+│   ├── web_search.py            搜索聚合（博查/Tavily/DDG，按 CJK 分流）
+│   ├── web_search_provider.py   三家搜索的后端实现
+│   ├── update_index.py          增量建索引（mtime+size 指纹 → file_state.json）
+│   ├── build_index.py           早期全量建索引脚本（已被 update_index 取代）
+│   ├── chat_box.py              CLI 对话入口（保留，web 入口为主）
+│   ├── permission.py            user_id → basic/pro/quant 权限表 + runtime context
+│   ├── response_format.py       结构化输出 schema（当前因模型不适配被注释掉）
+│   ├── calibrate.py             路由调参/评测脚本（内嵌测试语料）
+│   ├── unitest_sample.py        示例单测
+│   └── .env                     API keys
+│
+├── file_ingest/               ★ 新增模块：文件读取与检索（2026-09-16）
+│   ├── __init__.py              对外 API + 惰性导入 langchain 依赖
+│   ├── loader.py                多格式解析：pdf/pptx/docx/py/ts/go…
+│   ├── store.py                 FileStore：Chroma 封装，按 file_id 隔离
+│   ├── router.py                has_file_intent() 文件意图硬路由（正则）
+│   ├── prompt.py                文件清单注入 system prompt
+│   ├── tools.py                 ingest_file / query_file 两个 Tool
+│   └── tests/                   8 个测试文件（含 live chroma、真实文档）
+│
+├── character/                   人设源文件：IDENTITY / SOUL / USER / Intimacy.md
+├── chroma_rag/                  向量库数据（chroma.sqlite3 + file_state.json）
+├── docs/                        RAG 语料（README/log/optimize.md 的副本）
+└── pictures/                    头像等静态资源 
+```
+
+---
+
+## 快速开始
+
+### 1. 准备文档与索引
+
+```bash
+mkdir docs
+# 把你的 md/txt/pdf 丢进 docs/
+cp ~/notes/*.md docs/
+cp ~/project/*.pdf docs/
+
+python update_index.py
+```
+
+`update_index.py` 会扫描 `docs/` 所有文件，对比 `file_state.json`，**只处理新文件和 mtime/size 变了的文件**，切片后追加进已有 Chroma。
+
+> ⚠️ 若更改了 `chunk_size` 或 `chunk_overlap`，需删除旧库重建，否则切片大小不一致会导致检索精度下降：
+> ```bash
+> rm -r chroma_rag
+> ```
+
+### 2. 配置环境变量
+
+在 `.env` 中填入所需 Key（API Key 不要硬编码进代码）：
+
+```env
+DEEPSEEK_API_KEY=xxx     # 可以去self_packages/dynamic_select.py把basic_model与advanced_model换成你想要的模型
+BOCHA_API_KEY=xxx        # 博查（中文搜索）
+TAVILY_API_KEY=xxx       # Tavily（英文搜索）
+HF_TOKEN=xxx             # HuggingFace（cross-encoder / embedding）
+HF_HUB_OFFLINE=1         # 在下载好embedding模型后可以设置离线模式以提速
+DEV_DDG_FALLBACK=1       # 开发环境启用 DuckDuckGo 兜底
+```
+
+### 3. 启动
+
+```bash
+python web_chat_box.py            # Gradio 网页端
+```
+
+---
+
+## 核心设计：工具语义路由
+
+这是本项目最有价值的部分，也是我花时间最多的地方。
+
+### 问题
+
+工具多了以后，模型容易"乱选"。比如"看一下时间"这种短句，可能同时命中 `web_search`、`rag`、`timezone` 三个工具的描述，导致一次简单提问触发一堆无关调用。
+
+### 方案：两层打分 + 负例抑制
+
+不是把 query 分配到不同 Agent 管线，而是**对 query 做一次 embedding，根据语义距离选择工具输入**。
+
+打分逻辑演进过程：
+
+```
+v1: score = 0.7 × example_sim + 0.3 × desc_sim        # 只看正例，容易误绑
+v2: net_score = pos_score − 0.5 × neg_sim             # 引入负例抑制
+```
+
+| 项 | 含义 |
+|---|---|
+| `pos_score` | 正例相似度 + 工具描述相似度 |
+| `neg_sim` | 与 `negative_examples` 的最大余弦相似度（越像负例越高） |
+| `net_score` | 净分，被负例拉低 |
+
+阈值校准通过 `calibrate.py` 完成：`threshold` 决定哪些工具入选，`fallback_min_net` 是兜底底线。
+
+### 兜底机制与它的副作用
+
+早期为了保证"工具集永不为空"（从而让模型始终走结构化 function calling，避免 DSML 退化），我加了赢家兜底。
+
+但兜底有个代价：**几乎任何 query 都会强制绑一个工具**——"哈哈哈笑死"也会去调时间工具。
+
+解决：在兜底中加入底线 `fallback_min_net = 0.30`：
+- 净分太低 → 返回空，让模型直接回答（闲聊不再绑工具）
+- 保留对 "AI 新闻"(0.522) 这类边界 query 的兜底救援
+
+这是一个典型的 **trade-off**：宁可放过，不可错杀——但要给边界 case 留救援通道。
+
+### 路由收敛问题（已知）
+
+加入 `direct_answer` 路由后出现了"塞一堆工具"的现象，根源是两点：
+1. `route()` 用 `>= threshold` 筛选，没有"只取最佳"的收敛
+2. `direct_answer` 缺少"互斥优先权"，导致工具路由们一起过线
+
+属于"选错工具但侥幸答对"一类，仍在优化。详见下方[踩坑记录](#踩坑记录)。
+
+---
+
+## 网络搜索路由
+
+不引入额外 embedding 模型，靠**轻量启发式 + 配置态**决定，避免每次搜索多花一次 LLM 调用。
+
+**配置层（硬路由）**——看哪个 Key 存在：
+- `BOCHA_API_KEY` → 博查可用
+- `TAVILY_API_KEY` → Tavily 可用
+- `DEV_DDG_FALLBACK=1` → DDG 进候选
+
+**查询层（软路由）**——对 query 做轻量判断：
+- 含中日韩字符 → 优先博查（中文索引强）
+- 纯 ASCII 且像英文短语/技术名 → 博查失败再走 Tavily
+- 博查调用异常（429/超时/空结果）→ 自动跳下一个可用供应商
+
+**容错链**：供应商按顺序 try，全部失败返回固定错误串，**不让 LangGraph ToolNode 抛异常炸图**。
+
+> 注：博查的本地化搜索是基于请求 IP 在服务端完成的，AI 本身看不到你的 IP。
+
+---
+
+## RAG 设计
+
+- **检索流程**：query → Chroma 取 top50 → cross-encoder 重排序 → 返回 top3
+- **Embedding 选型**：通用 embedding（bge）专为"找文档"训练，区别于 LLM hidden state（专为"说人话"训练，检索弱）。后续计划迁移到 `bge-m3` 以更好支持中英混合 query。
+- **切片策略**：调整 `chunk_size` / `chunk_overlap` 以适应碎片化文本；markdown 考虑结构化切分。
+
+**语义路由示例：**
+
+| 用户问题 | 路由到 |
+|---|---|
+| "怎么配置 nginx" | 技术文档知识库 |
+| "年假还剩几天" | 人事制度知识库 |
+| "帮我写周报" | 纯 LLM（不走 RAG） |
+| "你是谁" | 固定回答（不走 LLM） |
+
+即：**用向量相似度代替 if/elif 做请求分发。**
+
+---
+
+## 踩坑记录
+
+- **DSML 退化**：模型在"手里没有可用工具"时会把工具调用写成正文文本。根因是 tool_router 参数与模型意愿相差过大，靠兜底保证工具集非空解决。
+- **上下文记忆失效**：重新加入 `checkpointer=InMemorySaver()` 后恢复短期记忆；去除了会被误认为用户信息的 `get_user_location` 工具。
+- **chunksize 不一致**：更改切片大小后未重建索引，导致检索出错、语义近似度精度降低——需删库重建。
+- **"选错但答对"**：路由选错工具，但容错链兜底拿到了正确结果。比直接报错更值得查，因为掩盖了路由缺陷。
+- **中间件与预绑定模型冲突**：中间件不能与已调用 `bind_tools` 的模型一起使用，参数需与工具参数绑定。
+- **权限设计**：`permission.py` 用一张 `USER_PERMISSIONS` 表集中管理，后续接真实权限服务时只需把 dict 换成数据库查询，调用方零改动。
+
+---
+
+## 后续方向
+
+- [ ] 迁移 embedding 到 `bge-m3`，根治中英混合 query 检索
+- [ ] Agent 文件读写能力（不仅"读"，还能"写"文档）
+- [ ] 跨对话长期记忆：按日期归档，主动写入本地文档（不依赖服务器运行）
+- [ ] FastAPI 异步页面 + 文件输入 + 多轮对话
+- [ ] 动态系统提示（根据用户输入选择提示词）
+- [ ] 多步骤协作（AgentExecutor / LangGraph）
+- [ ] AI 主动询问用户能力
+- [ ] 主动输出算法：特定时段 / 情感需求期，基于近期记忆主动向用户发起聊天
+
+---
+
+## 环境依赖
+
+详见 `pyproject.toml`。
+
+---
+
+## 许可证
+MIT
+This project is licensed under the MIT [License](LICENSE).

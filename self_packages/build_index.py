@@ -33,7 +33,7 @@ for loader in loaders:
 print(f"原始文档: {len(documents)}")
 
 splitter = RecursiveCharacterTextSplitter(
-    chunk_size=400, chunk_overlap=75,
+    chunk_size=400, chunk_overlap=50,
     separators=["\n\n","\n","。","！","？"," ",""],
 )
 splits = splitter.split_documents(documents)

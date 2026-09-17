@@ -18,5 +18,7 @@ agent = create_agent(
     checkpointer=InMemorySaver(),
     # response_format=ResponseFormat,   # deepseek-v4-flash不适配
 )
+
+# 单次invoke
 # prev_len_ref = [0]
 # cb(agent, prev_len_ref=prev_len_ref)

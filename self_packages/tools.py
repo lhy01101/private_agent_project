@@ -1,6 +1,7 @@
 # 工具定义，tools需要全部传入注册
 from self_packages.web_search import web_tool # 优先导入
 from langchain.agents.middleware import wrap_tool_call
+from file_ingest import configure, ingest_file, query_file
 from langchain_core.messages import ToolMessage
 from langchain.tools import tool, ToolRuntime
 from dataclasses import dataclass
@@ -85,5 +86,5 @@ rag_tool_2 = create_retriever_tool(
     "检索本地项目文档与笔记，回答私有知识问题前必须调用。"
 )
 
-tools = [get_weather_for_location, rag_tool_1, rag_tool_2, web_tool, get_system_timezone]
+tools = [get_weather_for_location, rag_tool_1, rag_tool_2, web_tool, get_system_timezone, ingest_file, query_file]
 

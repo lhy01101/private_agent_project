@@ -1,4 +1,7 @@
 # agent模型中间件，把模型剖开，可以用于动态选择模型/工具，后续可以在中间件上继续进行开发
+
+# 现已弃用，由update_index.py完全承担上位功能
+
 from langchain.agents.middleware import wrap_model_call, ModelRequest, ModelResponse, AgentMiddleware
 from langchain.chat_models import init_chat_model
 import os
@@ -30,8 +33,8 @@ class DynamicModelMiddleware(AgentMiddleware):
     trace_policy = None
     def wrap_model_call(self, request, call):
         msgs = request.state.get("messages", [])
-        if len(msgs) > 10:
-            request.override(model=advanced_model)
+        model = advanced_model if len(msgs) > 10 else basic_model
+        request = request.override(model=model)
         return call(request)
 
     async def awrap_model_call(self, request, call):   # 顺序对齐规则：request 永远在前面，callable 永远在后面，和同步版完全对称。

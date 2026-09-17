@@ -90,7 +90,6 @@
   - 有 BOCHA_API_KEY → 博查可用
   - 有 TAVILY_API_KEY → Tavily 可用
   - DEV_DDG_FALLBACK=1 → DDG 才进候选
-
 - 查询层路由（软/语义路由）：对 query 做轻量判断——
   - 含中日韩字符 → 优先博查（中文索引强）
   - 纯 ASCII 且像英文短语/技术名 → 博查失败再走 Tavily
@@ -123,7 +122,6 @@
 ## 9月9日日志
 - 把人格拼进prompt里面,新增prompt.py
 
-
 ##  9月10日日志
 - 添加工具timezone
 - 添加了工具提示词的负例机制
@@ -152,6 +150,14 @@ net_score = pos_score − 0.5 × neg_sim              # 净分（被负例拉低
 - 了解了agent读取文件的机制（不仅仅要读取，并要进行管理）
 - 生成了可直接交付工程师的file_achieve.md文件
 
+## 9月16日日志
+- 修了dynamic_select.py中同步流程的一个问题
+- 安装了file_ingest的依赖项
+- 查看元宝；我不确定项目是否有chroma_client，之前一直用chroma.sqlite3文件直接存RAG切片
+
+## 9月17日日志
+- 看direct_anser怎么设计
+- 写了github README文档与LICENSE许可证
 
 ---
 # 出现的问题
@@ -196,7 +202,7 @@ DSML 不是"模型抽风非要用的私有协议"，而是模型在"手里没有
 ---
 # **方向调整**：
 ## 可选方向
-- （可选）将embedding换成bge-m3
+- （可选）将embedding换成bge-m3以更适配中英混合的场景
 - 能够操作文件的工具：我想给我的智能体不仅能“读”，还能“写”，我想给他加上能写文档，写入各种文件的权限及能力
 - 对话记忆：按日期分，把重点对话和主动记忆放入本地文档
 - 先搞一个简单的fastapi界面？然后再加上文件输入和多轮对话功能
