@@ -18,6 +18,7 @@
    - request：本次请求。这是一个 ModelRequest 对象，核心字段：
        · request.messages：本次要发给模型的消息列表（list[BaseMessage]）
        · request.tools   ：当前可用工具列表
+       · request.tool_choice：本次的工具选择策略（None 表示交给模型，即 auto）
        · request.state   ：agent 状态；request.runtime：运行时上下文
      ⚠️ 注意：是 request.messages，不是 request.input["messages"]！
    - call   ：一个"继续往下走"的函数。你不调用 call(request)，整条链路就断了。
@@ -34,6 +35,17 @@ select_tools() 内部会跑 embedder.embed_query()，这是一次模型推理（
 - 在同步环境（wrap_model_call）里直接调用没问题。
 - 在异步环境（awrap_model_call）里【不能】直接调用，否则会阻塞整个事件循环。
   → 解决：用 asyncio 的 run_in_executor 把它丢到线程池里去跑。
+
+【为什么"直接回答"不能用 tools=[]】（DSML 的根因）
+--------------------------------------------------
+DeepSeek 的工具能力必须靠请求里显式带 tools 才启用。一旦 tools 被覆盖成空列表：
+- langchain/agents/factory.py 里是 `if final_tools: bind_tools(...)`，
+  空列表时连 bind_tools 都不会调用，模型这一轮彻底没有工具通道；
+- 但 system prompt / 上下文仍在要求它调工具 → 它只能把调用写成正文，也就是 DSML 文本。
+所以「直接回答」改为：工具声明照旧给全，只把 tool_choice 置为 "none"
+（DeepSeek 语义：不调用任何工具，而是生成一条消息）。
+
+→ 不变式：本中间件永远不会把 request.tools 覆盖为空列表。
 """
 
 import asyncio
@@ -45,6 +57,10 @@ from langchain.agents.middleware import AgentMiddleware
 from self_packages.tool_router import select_tools  # 返回 List[BaseTool]，即工具对象列表
 
 logger = logging.getLogger(__name__)
+
+# 「直接回答」分支使用的 tool_choice 取值。
+# DeepSeek 语义：模型不会调用任何工具，而是生成一条消息。
+NO_TOOL_TOOL_CHOICE = "none"
 
 
 class ToolRoutingMiddleware(AgentMiddleware):
@@ -68,79 +84,120 @@ class ToolRoutingMiddleware(AgentMiddleware):
     # ------------------------------------------------------------------ #
     def wrap_model_call(self, request, call):
         """
-        同步版本：裁剪工具后再放行。
+        同步版本：先算决策，再按分支放行。
         逻辑与异步版完全一致，区别只在「怎么调用 select_tools」。
         """
         # 1. 取出用户最新一条消息的文本
         content = self._extract_last_user_content(request)
 
-        # 2. 根据内容算出本次允许的工具（同步调用，同步环境里 OK）
-        #    allowed_names 为 None 表示"路由失败/取不到内容"，此时保守放行全部工具
-        allowed_names = self._compute_allowed(content)
+        # 2. 算出本次决策（同步调用，同步环境里 OK）
+        #    allowed_names 为 None 表示"路由失败/取不到内容"，此时不做任何干预
+        allowed_names, tool_choice = self._compute_decision(content)
 
-        # 3. 用算出的名字去 request.tools 里过滤（保留 request 里的原始工具对象）
-        #    若为 None → 降级：保留全部工具（宁可多给，别误杀）
+        # 3. 降级分支：路由不可用 → 不裁剪、不改 tool_choice，原样放行
         if allowed_names is None:
             return call(request)
+
+        # 4. 直接回答分支：工具声明照旧给全，只把 tool_choice 置为 "none"
+        #    ★ 关键：绝不用 tools=[] 表达"直接回答"。
+        #      工具为空时 factory 不会调 bind_tools，模型失去工具通道 → 退化成正文 DSML。
+        if not allowed_names:   # set()
+            if not request.tools:
+                logger.warning(
+                    "[ToolRouting] 判定直接回答，但 request.tools 已为空，"
+                    "模型将失去工具通道（DSML 风险）"
+                )
+            return call(request.override(tool_choice=tool_choice))  # request.override(tool_choice="none")
+
+        # 5. 需要工具分支：裁剪到相关工具，tool_choice 交回模型自己决定（None → auto）
         filtered = [t for t in request.tools if t.name in allowed_names]
 
-        # 4. 放行（工具为空 = 不给工具，让模型直接文本回答）
-        request = request.override(tools=filtered)
+        #    裁剪结果意外为空（工具名未注册 / 同名冲突）时同样不下发空集，降级为"声明照旧 + 禁止调用"
         if not filtered:
-            logger.warning("[ToolRouting] no tools allowed, falling back to text-only answer")
-        return call(request)
+            logger.warning(
+                "[ToolRouting] 裁剪结果为空，降级为 tool_choice=%s：%s",
+                NO_TOOL_TOOL_CHOICE,
+                sorted(allowed_names),
+            )
+            return call(request.override(tool_choice=NO_TOOL_TOOL_CHOICE))
+
+        return call(request.override(tools=filtered))
 
     async def awrap_model_call(self, request, call):
         """
-        异步版本：裁剪工具后再放行。
+        异步版本：先算决策，再按分支放行。
         与同步版唯一区别：select_tools 含模型推理，必须丢到线程池避免阻塞事件循环。
         """
         content = self._extract_last_user_content(request)
 
         # ★ 关键点：select_tools 是同步且有 CPU/GPU 计算的，不能在 async 里直接 await 它，
         #   而是把它提交到默认线程池，让出事件循环给其他协程。
-        allowed_names = await asyncio.get_event_loop().run_in_executor(
+        allowed_names, tool_choice = await asyncio.get_event_loop().run_in_executor(
             None,                          # 使用默认的 ThreadPoolExecutor
-            self._compute_allowed,         # 要执行的函数
+            self._compute_decision,        # 要执行的函数
             content,                       # 函数的参数
         )
 
+        # 降级分支：路由不可用 → 不裁剪、不改 tool_choice，原样放行
         if allowed_names is None:
             return await call(request)
+
+        # 直接回答分支：工具声明照旧给全，只把 tool_choice 置为 "none"
+        if not allowed_names:
+            if not request.tools:
+                logger.warning(
+                    "[ToolRouting] 判定直接回答，但 request.tools 已为空，"
+                    "模型将失去工具通道（DSML 风险）"
+                )
+            return await call(request.override(tool_choice=tool_choice))
+
+        # 需要工具分支：裁剪到相关工具，tool_choice 交回模型自己决定（None → auto）
         filtered = [t for t in request.tools if t.name in allowed_names]
-        request = request.override(tools=filtered)
         if not filtered:
-            logger.warning("[ToolRouting] no tools allowed, falling back to text-only answer")
-        return await call(request)
+            logger.warning(
+                "[ToolRouting] 裁剪结果为空，降级为 tool_choice=%s：%s",
+                NO_TOOL_TOOL_CHOICE,
+                sorted(allowed_names),
+            )
+            return await call(request.override(tool_choice=NO_TOOL_TOOL_CHOICE))
+
+        return await call(request.override(tools=filtered))
 
     # ------------------------------------------------------------------ #
     # 下面是抽取出来的公共逻辑（同步/异步共用，保证一致性）
     # ------------------------------------------------------------------ #
-    def _compute_allowed(self, content: Optional[str]) -> Optional[set]:
+    def _compute_decision(self, content: Optional[str]) -> tuple[Optional[set], Optional[str]]:
         """
-        根据用户输入文本，算出『本次允许使用的工具名集合』。
+        根据用户输入文本，算出本次的『工具裁剪方案』。
         抽成独立方法，是为了让同步/异步两个入口都走同一份逻辑。
 
         参数:
             content: 用户最新一条消息的文本；取不到时为 None。
-        返回:
-            - set[str]          ：允许的工具名集合（可为空 = 不给任何工具）
-            - None              ：路由失败 / 取不到有效内容，调用方应"放行全部"作为降级
+        返回 (allowed_names, tool_choice)：
+            - (None, None)          ：路由失败 / 取不到有效内容 → 调用方原样放行，不做干预
+            - (set(), "none")       ：判定「直接回答」→ 工具声明照旧给全，只禁止调用
+            - ({工具名, ...}, None) ：判定「要调工具」→ 裁剪到这些工具，tool_choice 交回模型
         """
         # 取不到有效文本 → 保守降级：放行全部（宁可多给，别误杀）
         if not content:
             logger.debug("[ToolRouting] empty user content, fallback to all tools")
-            return None
+            return None, None
 
         try:
             # select_tools 返回 List[BaseTool]（工具对象），取 .name 得到名字集合
-            allowed = {tool.name for tool in select_tools(content)}
+            picked = select_tools(content)
         except Exception as e:  # noqa
             # 路由出错时不要硬挂掉整个请求，降级为"给全部工具"
             logger.exception("[ToolRouting] select_tools failed, fallback to all tools: %s", e)
-            return None
+            return None, None
 
-        return allowed
+        # 空工具集 = 判定为「直接回答」。
+        # ⚠️ 这里返回空 set 的含义是"声明照旧、只禁调用"，绝不是"把 tools 覆盖成空列表"——
+        #    后者会让模型失去工具通道，退化成正文 DSML（见文件头部说明）。
+        if not picked:
+            return set(), NO_TOOL_TOOL_CHOICE
+
+        return {t.name for t in picked}, None
 
     def _extract_last_user_content(self, request) -> Optional[str]:
         """
@@ -213,5 +270,5 @@ class ToolRoutingMiddleware(AgentMiddleware):
     )
 
     # 异步调用时，会自动走 awrap_model_call，embedding 在线程池里跑，不阻塞事件循环
-    await agent.ainvoke({"input": "帮我查一下天气"})
+    await agent.ainvoke({"messages": [("user", "帮我查一下天气")]})
 """

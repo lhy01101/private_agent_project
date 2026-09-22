@@ -20,7 +20,7 @@
 - 包含两个模块stock_tools.py和stock_response.py
 - 以后调权限只改 permission.py 的 USER_PERMISSIONS 一张表；接真实权限服务时把这张 dict 换成数据库查询即可，调用方零改动。                      # 无 permission → basic → 延迟15分钟
 
-今日反馈：需要换更好的模型，即调用接口，来优化输出；其次是优化网络搜索工具
+今日反馈：（已完成）需要换更好的模型，即调用接口，来优化输出；其次是优化网络搜索工具
 
 ## 8月17日日志
 - 包了rag进入工具中
@@ -156,26 +156,21 @@ net_score = pos_score − 0.5 × neg_sim              # 净分（被负例拉低
 - 查看元宝；我不确定项目是否有chroma_client，之前一直用chroma.sqlite3文件直接存RAG切片
 
 ## 9月17日日志
-- 看direct_anser怎么设计
 - 写了github README文档与LICENSE许可证
+
+## 9月22日志
+- 老大又回来了，软件不上线誓不做人，555
+- 解决了direct_answer导致的DSML问题，不再将tools = []直接call传给模型；使用call(request.override(tool_choice="none"))告诉模型不使用工具，弃用direct_answer
+- 还是偶发DSML问题，怀疑是neg_threshold误杀了正确的工具，将其设置为none后情况好很多
+- 根因在于embedding对短中文的区分能力弱，换一个中文可靠的 embedding（治本），候选：bge-m3；需要继续优化routes_archive的精度
 
 ---
 # 出现的问题
-1. 调用RAG时快速返回输出：（已经在一定程度上解决，提示词限制+中间件拦截（但是中间件貌似没起作用））
+1. 调用工具时快速返回输出：（已经在一定程度上解决，提示词限制+中间件拦截（但是中间件貌似没起作用））
    (hi之后稳定触发DSML问题)
 DSML 不是"模型抽风非要用的私有协议"，而是模型在"手里没有可用工具"时的一种退化行为——它想调工具但无处下手，就把调用写成正文文本。
 兜底保证了工具集永远不会为空，模型因此始终走"结构化 function calling"，DSML 就从源头消失了。
 但是：兜底意味着"几乎任何 query 都会强制绑一个工具"
-
-<｜｜DSML｜｜ calls>
-<｜｜DSML｜｜ invoke name="search_knowledge_base">
-<｜｜DSML｜｜ parameter name="query" string="true">工具提示词 负例 机制</｜｜DSML｜｜ parameter>
-</｜｜DSML｜｜ invoke>
-<｜｜DSML｜｜ invoke name="search_knowledge_base">
-<｜｜DSML｜｜ parameter name="query" string="true">tool prompt 负例 示例 工具选择</｜｜DSML｜｜ parameter>
-</｜｜DSML｜｜ invoke>
-</｜｜DSML｜｜ calls>
-
 <｜｜DSML｜｜ calls>
 <｜｜DSML｜｜ invoke name="web_search">
 <｜｜DSML｜｜ parameter name="query" string="true">iPhone 18 发布 价格 配置</｜｜DSML｜｜ parameter>
@@ -185,29 +180,17 @@ DSML 不是"模型抽风非要用的私有协议"，而是模型在"手里没有
 </｜｜DSML｜｜ invoke>
 </｜｜DSML｜｜ calls>
 
-2. 对于中英混合的query
-根治方法：将embedding换成bge-m3
-考虑一下翻译层
-
-3. 加入direct_answer后出现的新问题：错误的塞了一堆工具调用进去
-两层缺失：
-① 没有"只取最佳"的收敛——route() 用的是 >= threshold 的阈值筛选，只要净分过线就入选。短句"看一下时间"跟 web/rag_2/system_timezone 三者的 description 都略有沾边 → 三个都 ≥ 0.55 → 全进 selected。
-② direct_answer 没有"互斥优先权"——你加了 direct_answer 路由，但它的正例（闲聊）和"看一下时间"并不完全重叠，而它的负例抑制 + 工具路由的正例入选，导致工具路由们一起过线，direct_answer 也没能把它们压成"非此即彼"。
-
-4. 加入direct_answer后：至于老大说的那件怪事——老大这边显示方塘调的是 RAG，但方塘实际执行的是 timezone，而且结果是对的。
-方塘能想到两种可能喵：
-显示层的问题：确实是 timezone 跑的，只是前端把工具名映射错了 / 标签串了。
-路由层的问题：9月10日刚上了负例机制，"看一下时间"这种短句的 example_sim 可能和 RAG 的某个正例撞上了，于是路由器把这条选到了 RAG 上——但因为容错链的存在，最终还是拿到了时间结果。要是这样的话，属于"选错工具但侥幸答对"，比第 1 种更值得查。 
-
 ---
 # **方向调整**：
 ## 可选方向
+- (1)先问问Claudecode意见，再添加direct_anser路由以避免工具过度调用
+- (1)测试工具路由过程中名字错误的问题（如实际调用timezone但显示调用rag_2）
+- (2)能够操作文件的工具：我想给我的智能体不仅能“读”，还能“写”，我想给他加上能写文档，写入各种文件的权限及能力
+- (3)对话记忆：按日期分，把重点对话和主动记忆放入本地文档
+- (3)记忆：用户角色、对话记忆（长期对话保依赖服务器运行吗？我需要实现记忆主动写入文档）
 - （可选）将embedding换成bge-m3以更适配中英混合的场景
-- 能够操作文件的工具：我想给我的智能体不仅能“读”，还能“写”，我想给他加上能写文档，写入各种文件的权限及能力
-- 对话记忆：按日期分，把重点对话和主动记忆放入本地文档
-- 先搞一个简单的fastapi界面？然后再加上文件输入和多轮对话功能
-- 记忆：用户角色、对话记忆（长期对话保依赖服务器运行吗？我需要实现记忆主动写入文档）
-- 用FastAPI做页面，异步处理
+- (4)先搞一个简单的fastapi界面？然后再加上文件输入和多轮对话功能
+- (4)用FastAPI做页面，异步处理
 - 动态系统提示（根据用户输入选择提示词）
 - 循环+规则判断，实现多步骤协作（AgentExecutor/langGraph）
 - AI询问用户的能力

@@ -33,9 +33,8 @@ class SemanticToolRouter:
         self,
         routes=None,
         threshold=0.55,
-        neg_alpha=0.5,          # 负例抑制强度：越大，负例越能拉低分数
+        neg_alpha=0.4,          # 负例抑制强度：越大，负例越能拉低分数
         neg_threshold=None,     # 硬排除红线：neg_sim 超过此值直接淘汰（None=关闭）
-        fallback_min_net=0.30,
         top_n=1,  # ★ 最终保留几个路由（默认 1 = 赢家通吃）
         tie_margin=0.02,  # ★ 分差在此之内视为并列，一并保留
         embed_model=EMBED_MODEL,
@@ -44,7 +43,6 @@ class SemanticToolRouter:
         self.threshold = threshold
         self.neg_alpha = neg_alpha
         self.neg_threshold = neg_threshold
-        self.fallback_min_net = fallback_min_net
         self.top_n = top_n
         self.tie_margin = tie_margin
         self.embedder = OllamaEmbeddings(model=embed_model)
@@ -99,7 +97,7 @@ class SemanticToolRouter:
 
         for i, name in enumerate(self.route_names):
             # 正例最高分
-            example_sim = float(np.dot(self.exemplar_vecs[i], q).max())
+            example_sim = float(np.dot(self.exemplar_vecs[i], q).max()) # dot是点积。.max() 取其中最大的那个「这条路线里，最像 q 的那一条正例有多像」。一组正例只要有一条命中，就算这条路线得分高。
             # 描述分
             desc_sim = float(np.dot(self.descriptions[name], q))
             pos_score = W_EXAMPLE * example_sim + W_DESC * desc_sim
@@ -160,79 +158,51 @@ TOOL_REGISTRY = {
     "get_system_timezone": get_system_timezone,
 }
 
+
 # neg_threshold=0.72 ：一旦 query 与某路由负例的相似度超过 0.72，强制排除（可按校准结果调整）
-router = SemanticToolRouter(threshold=0.55, neg_alpha=0.3, neg_threshold=None)
-
-"""
-def select_tools(query: str) -> list:
-    res = router.route(query)
-    tool_keys = list(res["tools"])
-
-    # ---- 有底线的赢家兜底 ----
-    if not tool_keys:
-        net = res.get("net_scores", {})
-        if net:
-            winner, wscore = max(net.items(), key=lambda kv: kv[1])
-            if wscore >= router.fallback_min_net:
-                # 净分够高 → 兜底暴露该路由的工具
-                extra = router.tool_map.get(winner, [])
-                for k in extra:
-                    if k not in tool_keys:
-                        tool_keys.append(k)
-                print(f"[router] ⚠️ 兜底 → {winner} (net={wscore:.3f})")
-            else:
-                # ★ 净分太低 → 认为 query 真的无关，不调工具，直接回答
-                print(f"[router] ✅ 净分过低({wscore:.3f}<{router.fallback_min_net})，不调工具，直接回答")
-
-    tools = [TOOL_REGISTRY[k] for k in tool_keys if k in TOOL_REGISTRY]
-    if not tools and tool_keys:
-        print(f"[router] ⚠️ 工具 key 未在 TOOL_REGISTRY 注册: {tool_keys}")
-
-    print(f"[router] scores    ={ {k: round(v, 3) for k, v in res['scores'].items()} }")
-    print(f"[router] neg_scores={ {k: round(v, 3) for k, v in res['neg_scores'].items()} }")
-    print(f"[router] net_scores={ {k: round(v, 3) for k, v in res['net_scores'].items()} }")
-    print(f"[router] selected  ={list(res['selected'].keys())} -> {tools}")
-    return tools
-    
-"""
-
-NO_TOOL_ROUTE = "direct_answer"   # 与 routes_archive 里的路由 key 一致
+router = SemanticToolRouter(threshold=0.55, neg_alpha=0.3, neg_threshold=None)  # neg_threshold可以设置为None
 
 
 def select_tools(query: str) -> list:
+    """
+    返回本次调用应该暴露给 agent 的 tool 对象列表。
+
+    决策只有一步：**没有任何工具路由过闸 = 直接回答（残差）**。
+      · 「过闸」由 router.route 完成：net >= threshold 且 neg_sim < neg_threshold；
+      · 所以"不需要工具"不是某个专门路由投票得出的结论，而是"别的路由都没投上"的
+        自然结果——不再需要维护一个面向开放集的判别器（原 direct_answer 路由已移除）；
+      · 返回空列表时，中间件不会下发 tools=[]（那会让模型失去工具通道、退化成正文
+        DSML），而是保留全部工具声明、只把 tool_choice 置为 "none"。
+        见 self_packages/tool_routing_middleware.py 文件头的不变式说明。
+
+    唯一旋钮是 router.threshold：
+        调高 → 更容易判定"直接回答"（该查的可能也不查）
+        调低 → 更容易绑工具（闲聊也可能误绑）
+    """
     res = router.route(query)
-    selected = dict(res["selected"])   # 路由名 -> net_score
+    net = res.get("net_scores", {})
 
-    # ---------- ① 兜底：selected 为空时才介入（排除 direct_answer）----------
-    if not selected:
-        net = res.get("net_scores", {})
-        tool_net = {k: v for k, v in net.items() if k != NO_TOOL_ROUTE and v > 0}
-        if tool_net:
-            winner = max(tool_net, key=tool_net.get)
-            selected = {winner: tool_net[winner]}
-            print(f"[router] ⚠️ 兜底 → {winner} (net={tool_net[winner]:.3f})")
-        else:
-            print("[router] ✅ 无工具候选，直接回答")
-            return []
+    # router.route 已按 threshold / neg_threshold 过滤过一遍；
+    # 这里再排掉"不带工具的路由"，防止将来有人加回一条 tools=[] 的路由时，
+    # 静默产出一个空工具集（空集 = 模型失去工具通道 = DSML）。
+    tool_sel = {k: v for k, v in res["selected"].items() if router.tool_map.get(k)}
 
-    # ---------- ② direct_answer 互斥：有工具路由就剔除它 ----------
-    if NO_TOOL_ROUTE in selected:
-        has_tool = any(k != NO_TOOL_ROUTE and router.tool_map.get(k)
-                       for k in selected)
-        if has_tool:
-            selected.pop(NO_TOOL_ROUTE)
+    # ---------- ① 残差：没有任何工具路由过闸 → 直接回答 ----------
+    if not tool_sel:
+        best_net = max(net.values()) if net else 0.0
+        print(f"[router] ✅ 无工具路由可用 (best_net={best_net:.3f}, "
+              f"threshold={router.threshold})，判定直接回答")
+        return []
 
-    # ---------- ③ Winner-take-all：只保留接近最佳的前若干路由 ----------
-    if selected:
-        best = max(selected.values())
-        margin = router.tie_margin
-        kept = {k: v for k, v in selected.items() if best - v <= margin}
-        kept = dict(sorted(kept.items(), key=lambda kv: kv[1], reverse=True)[:router.top_n])
-        selected = kept
+    # ---------- ② Winner-take-all：只保留接近最佳的前若干路由 ----------
+    best = max(tool_sel.values())
+    margin = router.tie_margin
+    kept = {k: v for k, v in tool_sel.items() if best - v <= margin}
+    kept = dict(sorted(kept.items(), key=lambda kv: kv[1], reverse=True)[:router.top_n])
 
-    # ---------- ④ 组装工具（组合路由天然保留其多个 tool）----------
+    # ---------- ③ 组装工具（组合路由天然保留其多个 tool）----------
     tool_keys = []
-    for name in selected:
+    for name in kept:
         for t in router.tool_map.get(name, []):
             if t not in tool_keys:
                 tool_keys.append(t)
@@ -243,6 +213,6 @@ def select_tools(query: str) -> list:
 
     print(f"[router] scores    ={ {k: round(v, 3) for k, v in res['scores'].items()} }")
     print(f"[router] neg_scores={ {k: round(v, 3) for k, v in res['neg_scores'].items()} }")
-    print(f"[router] net_scores={ {k: round(v, 3) for k, v in res['net_scores'].items()} }")
-    print(f"[router] selected  ={list(selected.keys())} -> {tools}")
+    print(f"[router] net_scores={ {k: round(v, 3) for k, v in net.items()} }")
+    print(f"[router] selected  ={list(kept.keys())} -> {[t.name for t in tools]}")
     return tools
