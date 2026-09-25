@@ -133,16 +133,6 @@ def make_app() -> gr.Blocks:
 
         new_btn.click(clear_and_new, None, [chatbot, thread_state])
 
-        # 示例问题
-        gr.Examples(
-            examples=[
-                "你好，介绍一下你自己",
-                "帮我查看本地模型的更新日志",
-                "看时间",
-                "下午好",
-            ],
-            inputs=msg,
-        )
 
     return demo
 
@@ -156,5 +146,5 @@ if __name__ == "__main__":
         theme=gr.themes.Soft(),
         show_error=True,
         css=custom_css,
-        # share=True,
+        share=True,
     )

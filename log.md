@@ -160,25 +160,42 @@ net_score = pos_score − 0.5 × neg_sim              # 净分（被负例拉低
 
 ## 9月22日志
 - 老大又回来了，软件不上线誓不做人，555
-- 解决了direct_answer导致的DSML问题，不再将tools = []直接call传给模型；使用call(request.override(tool_choice="none"))告诉模型不使用工具，弃用direct_answer
+- 解决了direct_answer导致的DSML问题，不再将tools = []直接call传给模型；使用call(request.override(tool_choice="none"))告诉模型不使用工具，弃用direct_answer；
+- select_tools只做工具裁剪，tool_choice 交回模型自己决定（None → auto）
 - 还是偶发DSML问题，怀疑是neg_threshold误杀了正确的工具，将其设置为none后情况好很多
-- 根因在于embedding对短中文的区分能力弱，换一个中文可靠的 embedding（治本），候选：bge-m3；需要继续优化routes_archive的精度
+- tool_choice约束的是输出通道，不是模型意图；tool_choice = None模型自主决定|auto模型自主决定|"none"模型侧不走function-call输出通道；在allowed_names = set()即工具集为空时tool_choice是直接设为"none"
+- "模型认为有工具可调" 与 "输出通道不可用" 同时成立
+- 根因在于embedding对短中文的区分能力弱，1.换一个中文可靠的 embedding（治本），候选：bge-m3；2.需要继续优化routes_archive的精度；3.将提示词里："你可以使用以下工具"修改为动态的
 
----
-# 出现的问题
-1. 调用工具时快速返回输出：（已经在一定程度上解决，提示词限制+中间件拦截（但是中间件貌似没起作用））
-   (hi之后稳定触发DSML问题)
-DSML 不是"模型抽风非要用的私有协议"，而是模型在"手里没有可用工具"时的一种退化行为——它想调工具但无处下手，就把调用写成正文文本。
-兜底保证了工具集永远不会为空，模型因此始终走"结构化 function calling"，DSML 就从源头消失了。
-但是：兜底意味着"几乎任何 query 都会强制绑一个工具"
-<｜｜DSML｜｜ calls>
-<｜｜DSML｜｜ invoke name="web_search">
-<｜｜DSML｜｜ parameter name="query" string="true">iPhone 18 发布 价格 配置</｜｜DSML｜｜ parameter>
-</｜｜DSML｜｜ invoke>
-<｜｜DSML｜｜ invoke name="web_search">
-<｜｜DSML｜｜ parameter name="query" string="true">iPhone 18 release date specs price 2026</｜｜DSML｜｜ parameter>
-</｜｜DSML｜｜ invoke>
-</｜｜DSML｜｜ calls>
+## 9月23日日志
+- 修改了prompt，把所有工具描述集中到工具的description中，不再在prompt声明工具。之后可以通过优化description去优化模型调用工具的意愿
+- 更新了中间件设计
+  1. 正常路由裁剪得到工具，tool_choice = None，模型手里只有这个工具，且让它决定要不要用这个工具
+  2. 裁剪后若工具集为空，暴露所有工具集（把直接回答合并到路由失败那条路），tool_choice = None，让模型自己决定
+  3. 之后工具路由的意义就在于缩短工具选择范围，不再有硬控制直接回答
+- "全量"传工具是兜底，不是常态；常态应该是路由命中后裁剪，只有残差时才兜底。
+- 新增_has_tool_activity：用于预防多轮粘性，「最后一条用户消息之后，是否出现过 ai.tool_calls 或 ToolMessage」。命中就跳过裁剪，不干预。
+
+
+## 9月25日日志
+- 更新了README.md描述
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 ---
 # **方向调整**：
@@ -195,3 +212,20 @@ DSML 不是"模型抽风非要用的私有协议"，而是模型在"手里没有
 - 循环+规则判断，实现多步骤协作（AgentExecutor/langGraph）
 - AI询问用户的能力
 - 小灵感：模拟主动输出的算法：特定时段/情感需求期/聊天后置时段 的特定输入或者空白输入，输入时根据近期细节记忆，向用户主动发出聊天邀请
+
+
+---
+# 出现的问题
+1. 调用工具时快速返回输出：（已经在一定程度上解决，提示词限制+中间件拦截（但是中间件貌似没起作用））
+   (hi之后稳定触发DSML问题)
+DSML 不是"模型抽风非要用的私有协议"，而是模型在"手里没有可用工具"时的一种退化行为——它想调工具但无处下手，就把调用写成正文文本。
+兜底保证了工具集永远不会为空，模型因此始终走"结构化 function calling"，DSML 就从源头消失了。
+但是：兜底意味着"几乎任何 query 都会强制绑一个工具"
+<｜｜DSML｜｜ calls>
+<｜｜DSML｜｜ invoke name="web_search">
+<｜｜DSML｜｜ parameter name="query" string="true">iPhone 18 发布 价格 配置</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+<｜｜DSML｜｜ invoke name="web_search">
+<｜｜DSML｜｜ parameter name="query" string="true">iPhone 18 release date specs price 2026</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+</｜｜DSML｜｜ calls>
