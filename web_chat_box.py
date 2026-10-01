@@ -91,8 +91,8 @@ async def respond(message: str, history: list, thread_id: str):
 
 # ==================== Gradio 界面 ====================
 def make_app() -> gr.Blocks:
-    with gr.Blocks(title="Agent 助手") as demo:
-        gr.Markdown(f"# Agent 网页助手\n模型：`{MODEL_NAME}`　|　支持多轮对话 / 流式输出 / 新对话")
+    with gr.Blocks(title="方塘") as demo:
+        # gr.Markdown(f"# Agent 网页助手\n模型：`{MODEL_NAME}`　|　支持多轮对话 / 流式输出 / 新对话")
 
         thread_state = gr.State(value=new_thread_id())
 
@@ -113,7 +113,7 @@ def make_app() -> gr.Blocks:
         )
 
         # 新对话按钮
-        new_btn = gr.Button("🆕 新对话", variant="secondary")
+        new_btn = gr.Button("新对话", variant="secondary")
 
         def clear_and_new():
             return [], new_thread_id()
