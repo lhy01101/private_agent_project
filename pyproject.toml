@@ -24,4 +24,5 @@ dependencies = [
     "sentence-transformers>=6.0.1",
     "tavily>=1.1.0",
     "tree-sitter>=0.26.0",
+    "uvicorn>=0.52.3",
 ]

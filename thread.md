@@ -244,6 +244,42 @@ text
 4. 列表 / 表格 / 定义块：不切
 5. 总结：Markdown 不要先想 chunk_size，先想结构；碎片化文档不要硬拼，小 chunk + 父子结构是王道。
 
+
+### 多对话实现
+多对话的核心是 thread_id 隔离 + 前端对话列表管理，分三层：
+
+Agent 层 — LangGraph Checkpointer
+
+你的 wonder_agent.py 已经配置了 InMemorySaver()，它按 thread_id 存储每个对话的完整消息历史。不同的 thread_id = 完全独立的对话上下文：
+
+web_app.py 中，每个请求带上对应对话的 thread_id
+agent.astream_events(
+    {"messages": [{"role": "user", "content": message}]},
+    config={"configurable": {"thread_id": conv_id}},  # 关键：隔离对话
+    version="v2",
+)
+
+后端 — 对话元数据管理
+
+web_app.py 维护一个字典，存储每个对话的元信息（id、标题、创建时间），并提供 REST API：
+
+POST   /api/conversations          → 创建新对话，生成 UUID 作为 conv_id
+GET    /api/conversations          → 列出所有对话（侧边栏用）
+DELETE /api/conversations/{id}     → 删除对话
+POST   /api/chat/{conv_id}        → 向指定对话发消息（conv_id 即 thread_id）
+
+每个对话的消息历史不需要后端额外存储——LangGraph 的 checkpointer 已经按 thread_id 自动管理了。后端只存标题等元数据。
+
+前端 — 状态切换
+
+app.js 维护 activeConvId 变量，用户点击侧边栏不同对话时：
+
+点击对话A → activeConvId = "uuid-A" → 清空聊天区 → 后续消息发到 /api/chat/uuid-A
+点击对话B → activeConvId = "uuid-B" → 清空聊天区 → 后续消息发到 /api/chat/uuid-B
+点"新对话" → POST /api/conversations → 拿到新 UUID → 开始全新对话
+
+简单来说：前端管理"当前选中的是哪个对话"，后端把每条消息路由到对应 thread_id 的 LangGraph 线程，checkpointer 负责维护各线程独立的历史。切换对话就是切换 thread_id，互不干扰。
+
 ---
 
 ## 费用

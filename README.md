@@ -329,7 +329,7 @@ python self_packages/update_index.py
 ### 8.4 启动
 
 ```bash
-uv run python web_chat_box.py
+uv run python web_app.py
 ```
 
 浏览器访问 `http://127.0.0.1:7860`（局域网内可通过本机 IP 访问，服务监听 `0.0.0.0`）。

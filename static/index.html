@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>方塘 AI</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.0/marked.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+</head>
+<body>
+    <div id="app">
+        <aside id="sidebar">
+            <div class="sidebar-header">
+                <div class="brand">
+                    <span class="brand-icon">方</span>
+                    <span class="brand-text">方塘</span>
+                </div>
+                <button id="new-chat-btn" title="新建对话">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="12" y1="5" x2="12" y2="19"></line>
+                        <line x1="5" y1="12" x2="19" y2="12"></line>
+                    </svg>
+                    <span>新对话</span>
+                </button>
+            </div>
+            <div id="conversation-list"></div>
+        </aside>
+
+        <main id="main">
+            <header id="chat-header">
+                <button id="sidebar-toggle" title="切换侧栏">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="3" y1="6" x2="21" y2="6"></line>
+                        <line x1="3" y1="12" x2="21" y2="12"></line>
+                        <line x1="3" y1="18" x2="21" y2="18"></line>
+                    </svg>
+                </button>
+                <h2 id="current-title">方塘 AI</h2>
+            </header>
+
+            <div id="chat-container">
+                <div id="welcome" class="welcome">
+                    <div class="welcome-icon">方</div>
+                    <h2>欢迎使用方塘 AI</h2>
+                    <p>输入消息开始对话，或创建一个新的对话</p>
+                </div>
+                <div id="messages"></div>
+            </div>
+
+            <footer id="input-area">
+                <div class="input-wrapper">
+                    <textarea id="message-input" placeholder="输入消息... (Shift+Enter 换行)" rows="1"></textarea>
+                    <button id="send-btn" title="发送" disabled>
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <line x1="22" y1="2" x2="11" y2="13"></line>
+                            <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+                        </svg>
+                    </button>
+                </div>
+            </footer>
+        </main>
+    </div>
+    <script src="/static/app.js"></script>
+</body>
+</html>
