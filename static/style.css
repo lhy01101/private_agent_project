@@ -89,6 +89,19 @@ button {
     gap: 10px;
 }
 
+#sidebar-collapse-btn {
+    margin-left: auto;
+    padding: 4px;
+    border-radius: 6px;
+    color: var(--sidebar-muted);
+    transition: color var(--transition), background var(--transition);
+}
+
+#sidebar-collapse-btn:hover {
+    color: var(--sidebar-text);
+    background: rgba(255,255,255,0.08);
+}
+
 .brand-icon {
     width: 36px;
     height: 36px;

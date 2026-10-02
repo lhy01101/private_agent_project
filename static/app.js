@@ -3,6 +3,7 @@ const API_BASE = '';
 let conversations = [];
 let activeConvId = null;
 let isStreaming = false;
+let userScrolledUp = false;
 const messageCache = new Map();
 
 const messagesEl = document.getElementById('messages');
@@ -14,6 +15,7 @@ const convListEl = document.getElementById('conversation-list');
 const titleEl = document.getElementById('current-title');
 const sidebarEl = document.getElementById('sidebar');
 const sidebarToggle = document.getElementById('sidebar-toggle');
+const sidebarCollapseBtn = document.getElementById('sidebar-collapse-btn');
 const chatContainer = document.getElementById('chat-container');
 
 marked.setOptions({
@@ -53,6 +55,16 @@ function setupListeners() {
 
     sidebarToggle.addEventListener('click', () => {
         sidebarEl.classList.toggle('collapsed');
+    });
+
+    sidebarCollapseBtn.addEventListener('click', () => {
+        sidebarEl.classList.toggle('collapsed');
+    });
+
+    chatContainer.addEventListener('scroll', () => {
+        const threshold = 80;
+        const atBottom = chatContainer.scrollHeight - chatContainer.scrollTop - chatContainer.clientHeight < threshold;
+        userScrolledUp = !atBottom;
     });
 
     inputEl.addEventListener('input', () => {
@@ -267,7 +279,7 @@ function restoreMessages(convId) {
     if (cached) {
         messagesEl.innerHTML = cached;
         welcomeEl.style.display = 'none';
-        scrollToBottom();
+        scrollToBottom(true);
     } else {
         clearChat();
     }
@@ -289,6 +301,7 @@ async function sendMessage() {
     inputEl.value = '';
     inputEl.style.height = 'auto';
     sendBtn.disabled = true;
+    userScrolledUp = false;
 
     appendMessage('user', text);
 
@@ -320,7 +333,7 @@ async function streamResponse(message) {
     typing.className = 'typing-indicator';
     typing.innerHTML = '<div class="dot"></div><div class="dot"></div><div class="dot"></div>';
     contentEl.appendChild(typing);
-    scrollToBottom();
+    scrollToBottom(true);
 
     try {
         const res = await fetch(`${API_BASE}/api/chat/${activeConvId}`, {
@@ -360,7 +373,7 @@ async function streamResponse(message) {
                         }, () => {
                             toolIndicator = createToolIndicator(data.content);
                             contentEl.appendChild(toolIndicator);
-                            scrollToBottom();
+                            scrollToBottom(true);
                         }, () => {
                             if (toolIndicator) {
                                 toolIndicator.remove();
@@ -392,7 +405,7 @@ async function streamResponse(message) {
         isStreaming = false;
         sendBtn.disabled = !inputEl.value.trim();
         inputEl.focus();
-        scrollToBottom();
+        scrollToBottom(true);
     }
 }
 
@@ -439,7 +452,7 @@ function appendMessage(role, content) {
     bubble.appendChild(contentEl);
     msg.appendChild(bubble);
     messagesEl.appendChild(msg);
-    scrollToBottom();
+    scrollToBottom(true);
 
     return msg;
 }
@@ -462,8 +475,12 @@ function createToolIndicator(text) {
     return el;
 }
 
-function scrollToBottom() {
-    chatContainer.scrollTop = chatContainer.scrollHeight;
+function scrollToBottom(force) {
+    if (!force && userScrolledUp && isStreaming) return;
+    chatContainer.scrollTo({
+        top: chatContainer.scrollHeight,
+        behavior: 'smooth',
+    });
 }
 
 window.copyCode = function (btn) {

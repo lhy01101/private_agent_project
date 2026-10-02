@@ -258,6 +258,38 @@ async def root():
 
 
 if __name__ == "__main__":
+    import subprocess
+    import sys
+    import threading
     import uvicorn
-    # http://localhost:8000
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+    tunnel_proc = None
+
+    def start_tunnel():
+        global tunnel_proc
+        try:
+            tunnel_proc = subprocess.Popen(
+                "npx localtunnel --port 8000",
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            for line in tunnel_proc.stdout:
+                line = line.strip()
+                if "your url is:" in line:
+                    url = line.split("your url is:")[-1].strip()
+                    print(f"\n{'='*50}", flush=True)
+                    print(f"  Public URL: {url}", flush=True)
+                    print(f"{'='*50}\n", flush=True)
+                    break
+        except Exception as e:
+            print(f"[tunnel] Failed to start: {e}", flush=True)
+
+    threading.Thread(target=start_tunnel, daemon=True).start()
+
+    try:
+        uvicorn.run(app, host="0.0.0.0", port=8000)
+    finally:
+        if tunnel_proc:
+            tunnel_proc.terminate()
