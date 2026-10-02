@@ -1,9 +1,12 @@
 """
-方塘 AI Chat - FastAPI Web Interface
+方塘 AI Chat - FastAPI Web Interface (Redis Persistence)
 Run: python web_app.py
+Env: REDIS_URL=redis://localhost:6379 (default)
 """
 
+import json
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime
 
 from fastapi import FastAPI, HTTPException
@@ -12,17 +15,45 @@ from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from wonder_agent import agent
+from wonder_agent import agent, checkpointer
 
-app = FastAPI(title="方塘 AI Chat")
+REDIS_URL = "redis://localhost:6379"
+
+_redis = None
+_conversations: dict[str, dict] = {}
+
+
+@asynccontextmanager
+async def lifespan(app):
+    global _redis
+    try:
+        import redis.asyncio as aioredis
+        _redis = aioredis.from_url(REDIS_URL, decode_responses=True)
+        await _redis.ping()
+        print(f"[metadata] Redis: {REDIS_URL}")
+    except Exception as e:
+        _redis = None
+        print(f"[metadata] Redis unavailable ({e}), using in-memory")
+
+    try:
+        if hasattr(checkpointer, "setup"):
+            checkpointer.setup()
+    except Exception:
+        pass
+
+    yield
+
+    if _redis:
+        await _redis.aclose()
+
+
+app = FastAPI(title="方塘 AI Chat", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-conversations: dict[str, dict] = {}
 
 
 class ChatRequest(BaseModel):
@@ -33,50 +64,111 @@ class TitleRequest(BaseModel):
     title: str
 
 
+# ── Conversation metadata (Redis or in-memory fallback) ──
+
+
 @app.get("/api/conversations")
 async def list_conversations():
-    return sorted(
-        conversations.values(),
-        key=lambda c: c["created_at"],
-        reverse=True,
-    )
+    if _redis:
+        ids = await _redis.zrevrange("ft:conversations", 0, -1)
+        result = []
+        for cid in ids:
+            data = await _redis.hgetall(f"ft:conv:{cid}")
+            if data:
+                result.append(data)
+        return result
+    return sorted(_conversations.values(), key=lambda c: c["created_at"], reverse=True)
 
 
 @app.get("/api/conversations/{conv_id}")
 async def get_conversation(conv_id: str):
-    if conv_id not in conversations:
+    if _redis:
+        data = await _redis.hgetall(f"ft:conv:{conv_id}")
+        if not data:
+            raise HTTPException(404, "Conversation not found")
+        return data
+    if conv_id not in _conversations:
         raise HTTPException(404, "Conversation not found")
-    return conversations[conv_id]
+    return _conversations[conv_id]
 
 
 @app.post("/api/conversations")
 async def create_conversation():
     conv_id = str(uuid.uuid4())
-    conversations[conv_id] = {
-        "id": conv_id,
-        "title": "新对话",
-        "created_at": datetime.now().isoformat(),
-    }
-    return conversations[conv_id]
+    conv = {"id": conv_id, "title": "新对话", "created_at": datetime.now().isoformat()}
+    if _redis:
+        await _redis.hset(f"ft:conv:{conv_id}", mapping=conv)
+        await _redis.zadd("ft:conversations", {conv_id: datetime.now().timestamp()})
+    else:
+        _conversations[conv_id] = conv
+    return conv
 
 
 @app.delete("/api/conversations/{conv_id}")
 async def delete_conversation(conv_id: str):
-    conversations.pop(conv_id, None)
+    if _redis:
+        await _redis.delete(f"ft:conv:{conv_id}")
+        await _redis.zrem("ft:conversations", conv_id)
+    else:
+        _conversations.pop(conv_id, None)
     return {"ok": True}
 
 
 @app.post("/api/conversations/{conv_id}/title")
 async def update_title(conv_id: str, req: TitleRequest):
-    if conv_id not in conversations:
-        raise HTTPException(404)
-    conversations[conv_id]["title"] = req.title
+    if _redis:
+        if not await _redis.exists(f"ft:conv:{conv_id}"):
+            raise HTTPException(404)
+        await _redis.hset(f"ft:conv:{conv_id}", "title", req.title)
+    else:
+        if conv_id not in _conversations:
+            raise HTTPException(404)
+        _conversations[conv_id]["title"] = req.title
     return {"ok": True}
+
+
+@app.get("/api/history/{conv_id}")
+async def get_history(conv_id: str):
+    try:
+        config = {"configurable": {"thread_id": conv_id}}
+        state = await agent.aget_state(config)
+        print(f"[history] state for {conv_id}: values_keys={list(state.values.keys()) if state.values else None}")
+        messages = state.values.get("messages", []) if state.values else []
+        print(f"[history] {conv_id}: {len(messages)} messages found")
+        result = []
+        for msg in messages:
+            content = msg.content if isinstance(msg.content, str) else str(msg.content)
+            msg_type = getattr(msg, "type", "")
+            if msg_type == "human":
+                result.append({"role": "user", "content": content})
+            elif msg_type == "ai":
+                if content:
+                    result.append({"role": "assistant", "content": content})
+            elif msg_type == "tool":
+                result.append({
+                    "role": "assistant",
+                    "content": f"> 工具调用 ({getattr(msg, 'name', '')})\n\n{content}",
+                })
+        print(f"[history] {conv_id}: returning {len(result)} formatted messages")
+        return {"messages": result}
+    except Exception as e:
+        print(f"[history] ERROR for {conv_id}: {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"messages": []}
+
+
+# ── Chat (agent history persisted by LangGraph checkpointer) ──
 
 
 @app.post("/api/chat/{conv_id}")
 async def chat(conv_id: str, req: ChatRequest):
-    if conv_id not in conversations:
+    exists = (
+        await _redis.exists(f"ft:conv:{conv_id}")
+        if _redis
+        else conv_id in _conversations
+    )
+    if not exists:
         raise HTTPException(404, "Conversation not found")
 
     message = req.message.strip()
@@ -84,12 +176,10 @@ async def chat(conv_id: str, req: ChatRequest):
         raise HTTPException(400, "Empty message")
 
     async def event_stream():
-        import json as _json
-
         def _sse(event: str, data: str) -> str:
             return f"event: {event}\ndata: {data}\n\n"
 
-        yield _sse("user_message", _json.dumps({"content": message}, ensure_ascii=False))
+        yield _sse("user_message", json.dumps({"content": message}, ensure_ascii=False))
 
         partial = ""
         has_content = False
@@ -122,15 +212,16 @@ async def chat(conv_id: str, req: ChatRequest):
                             has_content = True
                             yield _sse(
                                 "text",
-                                _json.dumps({"content": text}, ensure_ascii=False),
+                                json.dumps({"content": text}, ensure_ascii=False),
                             )
 
                 elif kind == "on_tool_start":
                     tool_name = event.get("name", "unknown")
-                    display = f"正在调用: {tool_name}"
                     yield _sse(
                         "tool",
-                        _json.dumps({"content": display}, ensure_ascii=False),
+                        json.dumps(
+                            {"content": f"正在调用: {tool_name}"}, ensure_ascii=False
+                        ),
                     )
 
                 elif kind == "on_tool_end":
@@ -138,17 +229,14 @@ async def chat(conv_id: str, req: ChatRequest):
 
         except Exception as e:
             yield _sse(
-                "error",
-                _json.dumps({"content": f"Error: {e}"}, ensure_ascii=False),
+                "error", json.dumps({"content": f"Error: {e}"}, ensure_ascii=False)
             )
             return
 
         if not has_content:
             yield _sse(
                 "text",
-                _json.dumps(
-                    {"content": "（未生成文本输出）"}, ensure_ascii=False
-                ),
+                json.dumps({"content": "（未生成文本输出）"}, ensure_ascii=False),
             )
 
         yield _sse("done", "{}")
@@ -156,10 +244,7 @@ async def chat(conv_id: str, req: ChatRequest):
     return StreamingResponse(
         event_stream(),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        },
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 
@@ -169,7 +254,6 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 @app.get("/")
 async def root():
     from fastapi.responses import FileResponse
-
     return FileResponse("static/index.html")
 
 

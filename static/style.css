@@ -252,6 +252,7 @@ button {
     padding: 20px 0;
 }
 
+
 #chat-container::-webkit-scrollbar {
     width: 6px;
 }
@@ -297,9 +298,8 @@ button {
 
 /* ===== Messages ===== */
 #messages {
-    max-width: 800px;
-    margin: 0 auto;
-    padding: 0 20px;
+    width: 100%;
+    padding: 0 48px;
 }
 
 .message {
@@ -322,7 +322,7 @@ button {
 }
 
 .message-bubble {
-    max-width: 75%;
+    max-width: 85%;
     padding: 12px 16px;
     border-radius: var(--radius);
     line-height: 1.65;
@@ -500,13 +500,12 @@ button {
 
 /* ===== Input Area ===== */
 #input-area {
-    padding: 12px 20px 20px;
+    padding: 12px 8px 20px;
     background: var(--main-bg);
 }
 
 .input-wrapper {
-    max-width: 800px;
-    margin: 0 auto;
+    width: 100%;
     display: flex;
     align-items: flex-end;
     gap: 10px;

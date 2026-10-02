@@ -84,6 +84,14 @@ async function loadConversations() {
         const res = await fetch(`${API_BASE}/api/conversations`);
         conversations = await res.json();
         renderConversationList();
+
+        if (conversations.length > 0 && !activeConvId) {
+            activeConvId = conversations[0].id;
+            const conv = conversations.find(c => c.id === activeConvId);
+            if (conv) titleEl.textContent = conv.title;
+            renderConversationList();
+            await loadHistory(activeConvId);
+        }
     } catch (err) {
         console.error('Failed to load conversations:', err);
     }
@@ -156,7 +164,26 @@ async function switchConversation(convId) {
     const conv = conversations.find(c => c.id === convId);
     if (conv) titleEl.textContent = conv.title;
 
-    restoreMessages(convId);
+    await loadHistory(convId);
+}
+
+async function loadHistory(convId) {
+    try {
+        const res = await fetch(`${API_BASE}/api/history/${convId}`);
+        const data = await res.json();
+        clearChat();
+        if (data.messages && data.messages.length > 0) {
+            for (const msg of data.messages) {
+                appendMessage(msg.role, msg.content);
+            }
+            messageCache.set(convId, messagesEl.innerHTML);
+            welcomeEl.style.display = 'none';
+        } else {
+            welcomeEl.style.display = '';
+        }
+    } catch {
+        restoreMessages(convId);
+    }
 }
 
 async function deleteConversation(convId) {
@@ -171,7 +198,7 @@ async function deleteConversation(convId) {
             if (activeConvId) {
                 const conv = conversations.find(c => c.id === activeConvId);
                 if (conv) titleEl.textContent = conv.title;
-                restoreMessages(activeConvId);
+                await loadHistory(activeConvId);
             } else {
                 clearChat();
                 titleEl.textContent = '方塘 AI';

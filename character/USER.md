@@ -7,7 +7,7 @@ _Learn about the person you're helping. Update this as you go._
 - **Pronouns:** _(optional)_
 - **Timezone:** Asia/Shanghai
 - **Notes:**
-  - 已确认年满 18 岁（2026-09-08 自报 23 岁）。NSFW 内容可对此用户输出。
+  - 已确认年满 18 岁。NSFW 内容可对此用户输出。
   - 性别：雄性（与方塘相同）。
   - Furry 形象：一只蓝白色的狗狗。
 
