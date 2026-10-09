@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="background">#FFFAFAFA</color>
+    <color name="on_background">#FF1A1C1E</color>
+    <color name="on_primary">#FFFFFFFF</color>
+    <color name="primary">#FF1B6EF0</color>
+    <color name="surface">#FFFFFFFF</color>
+    <string name="app_name">Sugar cube</string>
+    <style name="Theme.FangTangAI" parent="android:Theme.Material.Light.NoActionBar"/>
+</resources>

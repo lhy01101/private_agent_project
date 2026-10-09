@@ -12,6 +12,10 @@ import os
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
 
 try:
+    import redis
+    r = redis.from_url(REDIS_URL)
+    r.ping()
+    r.close()
     from langgraph_checkpoint_plainredis import AsyncRedisSaver
     checkpointer = AsyncRedisSaver(url=REDIS_URL)
     print(f"[checkpointer] Redis (plain): {REDIS_URL}")

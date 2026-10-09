@@ -315,9 +315,19 @@ Token 预算：给每个对话设一个 token 上限，超出后触发摘要压�
 PostgresSaver 持久化 + 滑动窗口(最近5轮) + RAG 检索更早历史
 
 这样既保证重启不丢数据，又能在长对话中保持相关记忆，还和你现有的向量检索能力复用。
+
+### redis使用指南
+1. 启动服务：redis-server
+   使用配置文件启动服务：redis-server redis.conf --daemonize yes
+2. 查看redis进程：tasklist | findstr redis
+3. 查看端口占用：netstat -ano | findstr :6379（端口号）
+4. 杀死端口占用：taskkill /PID 19596（上面那条查出来的最后一列） /F
+
+
 ---
 
 ## 费用
 - 模型调用：deepseek-v4-flash（Flash 命中 0.02 元/M，未命中 1 元/M）
 - 网络搜索：博查 ¥0.036 / 次（即 ¥36 / 千次），可购买资源包
 - 网络搜索：tavily
+- 阿里云服务器：38/年

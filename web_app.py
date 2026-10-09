@@ -2,6 +2,7 @@
 方塘 AI Chat - FastAPI Web Interface (Redis Persistence)
 Run: python web_app.py
 Env: REDIS_URL=redis://localhost:6379 (default)
+http://localhost:8000
 """
 
 import json
