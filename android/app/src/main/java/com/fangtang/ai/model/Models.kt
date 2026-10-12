@@ -11,3 +11,8 @@ data class ChatMessage(
     val content: String,
     val isStreaming: Boolean = false,
 )
+
+data class PendingFile(
+    val filename: String,
+    val content: String,
+)

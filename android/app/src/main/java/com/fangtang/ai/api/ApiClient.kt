@@ -4,6 +4,8 @@ import com.fangtang.ai.model.Conversation
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -78,16 +80,47 @@ object ApiClient {
         }
     }
 
+    suspend fun uploadFile(filename: String, bytes: ByteArray): com.fangtang.ai.model.PendingFile {
+        val body = MultipartBody.Builder()
+            .setType(MultipartBody.FORM)
+            .addFormDataPart(
+                "file",
+                filename,
+                bytes.toRequestBody("application/octet-stream".toMediaTypeOrNull()),
+            )
+            .build()
+        val request = Request.Builder()
+            .url("$baseUrl/api/upload")
+            .post(body)
+            .build()
+        val response = client.newCall(request).execute()
+        if (!response.isSuccessful) {
+            val err = response.body?.string() ?: "Upload failed"
+            throw Exception(err)
+        }
+        val respBody = response.body?.string() ?: throw Exception("Empty response")
+        val dto = json.decodeFromString<UploadResponseDto>(respBody)
+        return com.fangtang.ai.model.PendingFile(dto.filename, dto.content)
+    }
+
     fun streamChat(
         convId: String,
         message: String,
+        files: List<com.fangtang.ai.model.PendingFile> = emptyList(), // [NEW]
         onText: (String) -> Unit,
         onTool: (String) -> Unit,
         onToolEnd: () -> Unit,
         onError: (String) -> Unit,
         onDone: () -> Unit,
     ): EventSource {
-        val body = """{"message":"${message.replace("\"", "\\\"")}"}"""
+        // [NEW] 构建包含 files 的 JSON body
+        val filesJson = if (files.isEmpty()) "" else {
+            val arr = files.joinToString(",") { f ->
+                """{"filename":"${f.filename.replace("\"", "\\\"")}","content":"${f.content.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")}"}"""
+            }
+            ""","files":[$arr]"""
+        }
+        val body = """{"message":"${message.replace("\"", "\\\"")}"$filesJson}"""
         val request = Request.Builder()
             .url("$baseUrl/api/chat/$convId")
             .post(body.toRequestBody(JSON_MEDIA))
@@ -142,6 +175,12 @@ object ApiClient {
 
     @Serializable
     private data class TextDto(
+        val content: String,
+    )
+
+    @Serializable
+    private data class UploadResponseDto(
+        val filename: String,
         val content: String,
     )
 }

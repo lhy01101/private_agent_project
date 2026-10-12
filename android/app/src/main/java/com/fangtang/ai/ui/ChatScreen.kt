@@ -1,7 +1,10 @@
 package com.fangtang.ai.ui
 
 import android.graphics.Bitmap
+import android.net.Uri
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
@@ -14,6 +17,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -34,6 +39,8 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
@@ -43,6 +50,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -57,10 +65,12 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import com.fangtang.ai.model.ChatMessage
+import com.fangtang.ai.model.PendingFile
 import com.fangtang.ai.viewmodel.ChatViewModel
 import kotlinx.coroutines.launch
 
@@ -69,6 +79,24 @@ import kotlinx.coroutines.launch
 fun ChatScreen(viewModel: ChatViewModel, onOpenDrawer: () -> Unit) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+
+    // [NEW] 文件选择器
+    val filePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenMultipleDocuments(),
+    ) { uris: List<Uri> ->
+        for (uri in uris) {
+            try {
+                val inputStream = context.contentResolver.openInputStream(uri) ?: continue
+                val bytes = inputStream.readBytes()
+                inputStream.close()
+                val name = uri.lastPathSegment?.substringAfterLast('/') ?: "file"
+                viewModel.uploadFile(name, bytes)
+            } catch (e: Exception) {
+                viewModel.clearError()
+            }
+        }
+    }
 
     BackHandler(enabled = viewModel.currentConvId != null) {
         viewModel.goBackToList()
@@ -97,6 +125,9 @@ fun ChatScreen(viewModel: ChatViewModel, onOpenDrawer: () -> Unit) {
         bottomBar = {
             ChatInput(
                 isStreaming = viewModel.isStreaming,
+                pendingFiles = viewModel.pendingFiles,
+                onAttach = { filePickerLauncher.launch(arrayOf("*/*")) },
+                onRemoveFile = { viewModel.removeFile(it) },
                 onSend = { viewModel.sendMessage(it) },
             )
         },
@@ -253,9 +284,13 @@ private fun StreamingIndicator() {
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class) // [NEW]
 @Composable
 private fun ChatInput(
     isStreaming: Boolean,
+    pendingFiles: List<PendingFile> = emptyList(), // [NEW]
+    onAttach: () -> Unit = {},                     // [NEW]
+    onRemoveFile: (Int) -> Unit = {},              // [NEW]
     onSend: (String) -> Unit,
 ) {
     val textState = androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf("") }
@@ -267,10 +302,61 @@ private fun ChatInput(
             .padding(horizontal = 12.dp, vertical = 8.dp)
             .imePadding(),
     ) {
+        Column(modifier = Modifier.fillMaxWidth()) { // [NEW] 包裹文件芯片 + 输入行
+        // [NEW] 文件芯片预览
+        if (pendingFiles.isNotEmpty()) {
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 6.dp),
+            ) {
+                pendingFiles.forEachIndexed { index, file ->
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = MaterialTheme.colorScheme.primaryContainer,
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                        ) {
+                            Text(
+                                text = file.filename,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                maxLines = 1,
+                                modifier = Modifier.widthIn(max = 160.dp),
+                            )
+                            IconButton(
+                                onClick = { onRemoveFile(index) },
+                                modifier = Modifier.size(18.dp),
+                            ) {
+                                Icon(
+                                    Icons.Default.Close,
+                                    contentDescription = "移除",
+                                    modifier = Modifier.size(14.dp),
+                                    tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         Row(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.fillMaxWidth(),
         ) {
+            // [NEW] 附件按钮
+            IconButton(onClick = onAttach) {
+                Icon(
+                    Icons.Default.AttachFile,
+                    contentDescription = "上传文件",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             OutlinedTextField(
                 value = textState.value,
                 onValueChange = { textState.value = it },
@@ -280,7 +366,7 @@ private fun ChatInput(
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                 keyboardActions = KeyboardActions(
                     onSend = {
-                        if (textState.value.isNotBlank() && !isStreaming) {
+                        if ((textState.value.isNotBlank() || pendingFiles.isNotEmpty()) && !isStreaming) {
                             onSend(textState.value.trim())
                             textState.value = ""
                         }
@@ -291,7 +377,7 @@ private fun ChatInput(
             Spacer(Modifier.width(8.dp))
             IconButton(
                 onClick = {
-                    if (textState.value.isNotBlank() && !isStreaming) {
+                    if ((textState.value.isNotBlank() || pendingFiles.isNotEmpty()) && !isStreaming) {
                         onSend(textState.value.trim())
                         textState.value = ""
                     }
@@ -300,7 +386,7 @@ private fun ChatInput(
                     .size(48.dp)
                     .clip(CircleShape)
                     .background(
-                        if (textState.value.isNotBlank() && !isStreaming) MaterialTheme.colorScheme.primary
+                        if ((textState.value.isNotBlank() || pendingFiles.isNotEmpty()) && !isStreaming) MaterialTheme.colorScheme.primary
                         else MaterialTheme.colorScheme.surfaceVariant,
                     ),
             ) {
@@ -314,11 +400,12 @@ private fun ChatInput(
                     Icon(
                         Icons.AutoMirrored.Filled.Send,
                         contentDescription = "发送",
-                        tint = if (textState.value.isNotBlank()) MaterialTheme.colorScheme.onPrimary
+                        tint = if (textState.value.isNotBlank() || pendingFiles.isNotEmpty()) MaterialTheme.colorScheme.onPrimary
                         else MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }
         }
+        } // [NEW] 关闭 Column
     }
 }

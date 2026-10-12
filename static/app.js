@@ -5,6 +5,7 @@ let activeConvId = null;
 let isStreaming = false;
 let userScrolledUp = false;
 const messageCache = new Map();
+let pendingFiles = []; // [NEW] {filename, content}
 
 const messagesEl = document.getElementById('messages');
 const welcomeEl = document.getElementById('welcome');
@@ -17,6 +18,11 @@ const sidebarEl = document.getElementById('sidebar');
 const sidebarToggle = document.getElementById('sidebar-toggle');
 const sidebarCollapseBtn = document.getElementById('sidebar-collapse-btn');
 const chatContainer = document.getElementById('chat-container');
+const uploadBtn = document.getElementById('upload-btn');       // [NEW]
+const fileInput = document.getElementById('file-input');       // [NEW]
+const filePreview = document.getElementById('file-preview');   // [NEW]
+const inputWrapper = document.getElementById('input-wrapper'); // [NEW]
+const dropOverlay = document.getElementById('drop-overlay');   // [NEW]
 
 marked.setOptions({
     highlight(code, lang) {
@@ -68,7 +74,7 @@ function setupListeners() {
     });
 
     inputEl.addEventListener('input', () => {
-        sendBtn.disabled = !inputEl.value.trim() || isStreaming;
+        sendBtn.disabled = (!inputEl.value.trim() && pendingFiles.length === 0) || isStreaming; // [NEW] 考虑文件
         inputEl.style.height = 'auto';
         inputEl.style.height = Math.min(inputEl.scrollHeight, 150) + 'px';
     });
@@ -88,6 +94,35 @@ function setupListeners() {
         if (e.target.classList.contains('copy-btn')) {
             copyCode(e.target);
         }
+    });
+
+    // [NEW] 文件上传
+    uploadBtn.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', () => {
+        if (fileInput.files.length) handleFiles(fileInput.files);
+        fileInput.value = '';
+    });
+
+    let dragCounter = 0;
+    document.addEventListener('dragenter', (e) => {
+        e.preventDefault();
+        dragCounter++;
+        dropOverlay.classList.add('visible');
+    });
+    document.addEventListener('dragleave', (e) => {
+        e.preventDefault();
+        dragCounter--;
+        if (dragCounter <= 0) {
+            dragCounter = 0;
+            dropOverlay.classList.remove('visible');
+        }
+    });
+    document.addEventListener('dragover', (e) => e.preventDefault());
+    document.addEventListener('drop', (e) => {
+        e.preventDefault();
+        dragCounter = 0;
+        dropOverlay.classList.remove('visible');
+        if (e.dataTransfer.files.length) handleFiles(e.dataTransfer.files);
     });
 }
 
@@ -289,9 +324,56 @@ function hideWelcome() {
     welcomeEl.style.display = 'none';
 }
 
+// [NEW] 文件上传处理
+async function handleFiles(fileList) {
+    for (const file of fileList) {
+        if (pendingFiles.some(f => f.filename === file.name)) continue;
+        try {
+            const form = new FormData();
+            form.append('file', file);
+            const res = await fetch(`${API_BASE}/api/upload`, { method: 'POST', body: form });
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({ detail: '上传失败' }));
+                alert(`${file.name}: ${err.detail || '上传失败'}`);
+                continue;
+            }
+            const data = await res.json();
+            pendingFiles.push({ filename: data.filename, content: data.content });
+            renderFilePreview();
+        } catch (e) {
+            alert(`${file.name}: 上传失败`);
+        }
+    }
+}
+
+function removeFile(index) {
+    pendingFiles.splice(index, 1);
+    renderFilePreview();
+}
+
+function renderFilePreview() {
+    filePreview.innerHTML = '';
+    pendingFiles.forEach((f, i) => {
+        const chip = document.createElement('div');
+        chip.className = 'file-chip';
+        const ext = f.filename.split('.').pop().toLowerCase();
+        chip.innerHTML = `<span class="file-chip-ext">.${ext}</span><span class="file-chip-name">${f.filename}</span>`;
+        const remove = document.createElement('button');
+        remove.className = 'file-chip-remove';
+        remove.innerHTML = '&times;';
+        remove.addEventListener('click', () => removeFile(i));
+        chip.appendChild(remove);
+        filePreview.appendChild(chip);
+    });
+    sendBtn.disabled = (!inputEl.value.trim() && pendingFiles.length === 0) || isStreaming;
+}
+
+window.removeFile = removeFile;
+
 async function sendMessage() {
     const text = inputEl.value.trim();
-    if (!text) return;
+    const files = [...pendingFiles]; // [NEW] 捕获当前文件
+    if (!text && files.length === 0) return;
 
     if (!activeConvId) {
         await createNewConversation();
@@ -300,14 +382,21 @@ async function sendMessage() {
     hideWelcome();
     inputEl.value = '';
     inputEl.style.height = 'auto';
+    pendingFiles = [];          // [NEW]
+    renderFilePreview();        // [NEW]
     sendBtn.disabled = true;
     userScrolledUp = false;
 
-    appendMessage('user', text);
+    // [NEW] 显示文件附件信息
+    const displayText = files.length > 0
+        ? `📎 ${files.map(f => f.filename).join(', ')}${text ? '\n' + text : ''}`
+        : text;
+    appendMessage('user', displayText);
 
     const conv = conversations.find(c => c.id === activeConvId);
-    if (conv && conv.title === '新对话') {
-        const newTitle = text.slice(0, 20) + (text.length > 20 ? '...' : '');
+    const titleSource = text || files[0]?.filename || '';
+    if (conv && conv.title === '新对话' && titleSource) {
+        const newTitle = titleSource.slice(0, 20) + (titleSource.length > 20 ? '...' : '');
         conv.title = newTitle;
         titleEl.textContent = newTitle;
         renderConversationList();
@@ -318,10 +407,10 @@ async function sendMessage() {
         }).catch(() => {});
     }
 
-    await streamResponse(text);
+    await streamResponse(text, files); // [NEW] 传递文件
 }
 
-async function streamResponse(message) {
+async function streamResponse(message, files = []) { // [NEW] 增加 files 参数
     isStreaming = true;
     sendBtn.disabled = true;
 
@@ -336,10 +425,13 @@ async function streamResponse(message) {
     scrollToBottom(true);
 
     try {
+        const body = { message };
+        if (files.length > 0) body.files = files; // [NEW]
+
         const res = await fetch(`${API_BASE}/api/chat/${activeConvId}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ message }),
+            body: JSON.stringify(body), // [NEW] 改用 body 变量
         });
 
         if (!res.ok) {
@@ -403,7 +495,7 @@ async function streamResponse(message) {
         contentEl.innerHTML = `<span style="color:#ef4444">Error: ${err.message}</span>`;
     } finally {
         isStreaming = false;
-        sendBtn.disabled = !inputEl.value.trim();
+        sendBtn.disabled = !inputEl.value.trim() && pendingFiles.length === 0; // [NEW]
         inputEl.focus();
         scrollToBottom(true);
     }

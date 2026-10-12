@@ -10,13 +10,16 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from wonder_agent import agent, checkpointer
+from self_packages.file_upload import (  # [NEW] 文件上传
+    is_supported, save_upload, read_file_content, format_file_for_message,
+)
 
 REDIS_URL = "redis://localhost:6379"
 
@@ -59,6 +62,7 @@ app.add_middleware(
 
 class ChatRequest(BaseModel):
     message: str
+    files: list[dict] | None = None  # [NEW] 可选文件列表 [{filename, content}]
 
 
 class TitleRequest(BaseModel):
@@ -159,6 +163,21 @@ async def get_history(conv_id: str):
         return {"messages": []}
 
 
+# ── File upload [NEW] ──
+
+
+@app.post("/api/upload")
+async def upload_file(file: UploadFile = File(...)):
+    if not file.filename or not is_supported(file.filename):
+        raise HTTPException(400, "不支持的文件类型")
+    content = await file.read()
+    if len(content) > 10 * 1024 * 1024:
+        raise HTTPException(400, "文件过大（上限 10MB）")
+    path = save_upload(file.filename, content)
+    text = read_file_content(path)
+    return {"filename": file.filename, "content": text}
+
+
 # ── Chat (agent history persisted by LangGraph checkpointer) ──
 
 
@@ -173,6 +192,18 @@ async def chat(conv_id: str, req: ChatRequest):
         raise HTTPException(404, "Conversation not found")
 
     message = req.message.strip()
+
+    # [NEW] 将上传文件内容拼入消息
+    if req.files:
+        file_parts = []
+        for f in req.files:
+            filename = f.get("filename", "未知文件")
+            content = f.get("content", "")
+            if content:
+                file_parts.append(format_file_for_message(filename, content))
+        if file_parts:
+            message = "\n\n".join(file_parts) + ("\n\n" + message if message else "")
+
     if not message:
         raise HTTPException(400, "Empty message")
 

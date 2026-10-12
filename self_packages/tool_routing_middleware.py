@@ -66,6 +66,9 @@ from self_packages.tool_router import select_tools  # 返回 List[BaseTool]，�
 
 logger = logging.getLogger(__name__)
 
+# [NEW] 常驻工具：不受路由裁剪影响，始终对模型可见
+ALWAYS_AVAILABLE = {"read_local_file", "list_workspace"}
+
 
 class ToolRoutingMiddleware(AgentMiddleware):
     name = "tool_routing"
@@ -207,7 +210,9 @@ class ToolRoutingMiddleware(AgentMiddleware):
           1) 上游决策本来就是 None；
           2) 决策给了名字，但和 request.tools 对不上（工具名未注册 / 同名冲突）
              —— 这是**数据 bug**，不是路由决策，不能拿它去封死工具通道。
-                放行让模型用全量工具兜住，同时打 warning 提醒修数据。
+             放行让模型用全量工具兜住，同时打 warning 提醒修数据。
+
+        [NEW] 裁剪后补回常驻工具（ALWAYS_AVAILABLE），确保基础能力始终可用。
         """
         if not allowed_names:
             return None
@@ -218,6 +223,13 @@ class ToolRoutingMiddleware(AgentMiddleware):
             return None
 
         filtered = [t for t in request.tools if t.name in allowed_names]
+
+        # [NEW] 补回常驻工具（不受裁剪影响）
+        always_tools = [t for t in request.tools if t.name in ALWAYS_AVAILABLE]
+        for at in always_tools:
+            if at not in filtered:
+                filtered.append(at)
+
         if not filtered:
             logger.warning(
                 "[ToolRouting] 裁剪结果为空（工具名未注册/同名冲突？）→ 放行全部：%s",
@@ -226,10 +238,11 @@ class ToolRoutingMiddleware(AgentMiddleware):
             return None
 
         logger.debug(
-            "[ToolRouting] trim: %s/%s → %s",
+            "[ToolRouting] trim: %s/%s → %s (always: %s)",
             len(filtered),
             len(request.tools),
             sorted(t.name for t in filtered),
+            sorted(ALWAYS_AVAILABLE),
         )
         return filtered
 

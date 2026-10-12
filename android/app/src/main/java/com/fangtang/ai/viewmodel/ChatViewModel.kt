@@ -9,6 +9,7 @@ import androidx.lifecycle.viewModelScope
 import com.fangtang.ai.api.ApiClient
 import com.fangtang.ai.model.ChatMessage
 import com.fangtang.ai.model.Conversation
+import com.fangtang.ai.model.PendingFile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -41,6 +42,9 @@ class ChatViewModel : ViewModel() {
         private set
 
     var backgroundImage by mutableStateOf<Bitmap?>(null)
+        private set
+
+    var pendingFiles by mutableStateOf<List<PendingFile>>(emptyList()) // [NEW]
         private set
 
     private var eventSource: EventSource? = null
@@ -109,17 +113,26 @@ class ChatViewModel : ViewModel() {
 
     fun sendMessage(text: String) {
         val convId = currentConvId ?: return
-        if (text.isBlank() || isStreaming) return
+        val files = pendingFiles // [NEW] 捕获当前文件
+        if (text.isBlank() && files.isEmpty()) return // [NEW] 允许仅发文件
+        if (isStreaming) return
 
-        messages = messages + ChatMessage("user", text)
+        // [NEW] 用户消息显示附件
+        val displayText = if (files.isNotEmpty()) {
+            "📎 ${files.joinToString { it.filename }}${if (text.isNotBlank()) "\n$text" else ""}"
+        } else text
+
+        messages = messages + ChatMessage("user", displayText)
         val assistantIndex = messages.size
         messages = messages + ChatMessage("assistant", "", isStreaming = true)
         isStreaming = true
         errorMessage = null
+        pendingFiles = emptyList() // [NEW] 清空文件
 
         eventSource = ApiClient.streamChat(
             convId = convId,
             message = text,
+            files = files, // [NEW]
             onText = { chunk ->
                 val current = messages[assistantIndex]
                 messages = messages.toMutableList().apply {
@@ -151,6 +164,25 @@ class ChatViewModel : ViewModel() {
                 loadConversations()
             },
         )
+    }
+
+    fun uploadFile(filename: String, bytes: ByteArray) { // [NEW]
+        viewModelScope.launch {
+            try {
+                val file = withContext(Dispatchers.IO) {
+                    ApiClient.uploadFile(filename, bytes)
+                }
+                if (pendingFiles.none { it.filename == file.filename }) {
+                    pendingFiles = pendingFiles + file
+                }
+            } catch (e: Exception) {
+                errorMessage = "文件上传失败: ${e.message}"
+            }
+        }
+    }
+
+    fun removeFile(index: Int) { // [NEW]
+        pendingFiles = pendingFiles.toMutableList().apply { removeAt(index) }
     }
 
     fun goBackToList() {

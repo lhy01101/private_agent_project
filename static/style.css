@@ -574,6 +574,103 @@ button {
     cursor: not-allowed;
 }
 
+/* ===== [NEW] File upload UI ===== */
+#upload-btn {
+    padding: 8px;
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+    transition: background var(--transition), color var(--transition);
+    flex-shrink: 0;
+}
+
+#upload-btn:hover {
+    background: var(--accent-light);
+    color: var(--accent);
+}
+
+.file-preview {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 0 48px 8px;
+}
+
+.file-chip {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px 4px 10px;
+    background: var(--accent-light);
+    border-radius: 20px;
+    font-size: 13px;
+    color: var(--accent);
+    max-width: 220px;
+}
+
+.file-chip-ext {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    background: var(--accent);
+    color: #fff;
+    padding: 1px 5px;
+    border-radius: 4px;
+    flex-shrink: 0;
+}
+
+.file-chip-name {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.file-chip-remove {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    color: var(--accent);
+    flex-shrink: 0;
+    transition: background var(--transition);
+}
+
+.file-chip-remove:hover {
+    background: rgba(99, 102, 241, 0.2);
+}
+
+.drop-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(99, 102, 241, 0.12);
+    z-index: 1000;
+    align-items: center;
+    justify-content: center;
+    backdrop-filter: blur(2px);
+}
+
+.drop-overlay.visible {
+    display: flex;
+}
+
+.drop-overlay-inner {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+    padding: 40px 60px;
+    background: var(--chat-bg);
+    border: 2px dashed var(--accent);
+    border-radius: 20px;
+    color: var(--accent);
+    font-size: 18px;
+    font-weight: 500;
+    box-shadow: var(--shadow-md);
+}
+
 /* ===== Responsive ===== */
 @media (max-width: 768px) {
     :root {

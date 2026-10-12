@@ -1,0 +1,27 @@
+你拿到后要改的地方（3 处，都集中在接入层）
+
+模块设计成可独立运行、依赖惰性注入，所以直接 import 不会报错，但真正跑起来需要你把现有基础设施接进去：
+
+① tools.py 的 configure() —— 注入你的 Chroma 和 bge-m3
+
+python
+# 你的 Agent 启动处
+from file_ingest import configure, ingest_file, query_file
+from file_ingest.store import FileStore
+
+store = FileStore(chroma_client=你的_chroma_client, collection_name="agent_files")
+configure(store, embed_fn=你的_bge_m3函数)   # 接受 list[str]->list[list[float]]
+
+② 注册进工具池：把 ingest_file、query_file 加到你 Agent 的 tools 列表（它们是 @tool 装饰的，LangChain 直接认）。
+
+③ system prompt 组装：在拼 system prompt 时调用
+
+python
+from file_ingest import build_file_list_prompt, register_file
+prompt = build_file_list_prompt(store, active_file_ids)
+
+⚠️ 一个易踩点：ingest_file 返回后，调用方要主动 register_file(file_id, name, type, summary)​ 登记元信息，build_file_list_prompt 才能正确回填文件名（见 prompt.py 的 _REGISTRY 说明）。这块我在文档里标注了"应由 Agent 在 ingest 后维护"。
+
+两个已知可改点（你review时留意）
+router.py 的正则可能偏宽：现在"看一下/看下/分析/总结"这类动词命中就判为文件意图。若你发现正常对话误触发，把 _FILE_ACTION_RE 收紧（比如要求必须紧跟具体文件名）。
+tools.py 的全局状态（_INLINE_CACHE/_STORE）是模块级单例——单进程 OK，若你做多进程/多用户部署，需改成按会话隔离的字典（brief §十一也列为后续迭代）。
