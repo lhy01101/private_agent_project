@@ -148,16 +148,15 @@ class SemanticToolRouter:
         }
 
 
-from self_packages.tools import rag_tool_1, rag_tool_2, web_tool, get_system_timezone, read_local_file, list_workspace
+from self_packages.tools import rag_tool_1, rag_tool_2, web_tool, get_system_timezone
 
 # 2. 工具注册表：名字 -> 真实 tool 对象
+# 注意：read_local_file 和 list_workspace 是常驻工具（ALWAYS_AVAILABLE），不参与路由
 TOOL_REGISTRY = {
     "rag_tool_1": rag_tool_1,
     "rag_tool_2": rag_tool_2,
     "web_search": web_tool,
     "get_system_timezone": get_system_timezone,
-    "read_local_file": read_local_file,           # [NEW]
-    "list_workspace": list_workspace,             # [NEW]
 }
 
 

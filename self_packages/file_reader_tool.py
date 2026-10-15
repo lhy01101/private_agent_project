@@ -18,8 +18,7 @@ WORKSPACE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # 扫描时跳过的目录
 SKIP_DIRS = {
-    ".git", "__pycache__", "node_modules", ".venv", "venv", "env",
-    "chroma_rag", "uploads", ".qoder-cn", "static",
+    ".git", "__pycache__",  ".venv", ".env",".qoder-cn",
 }
 
 
